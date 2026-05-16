@@ -1497,19 +1497,30 @@ def _check_body_typography(document: DocumentInfo) -> list[Issue]:
         if _is_toc_paragraph(paragraph):
             continue
         text = paragraph.text.strip()
-        if paragraph.first_line_indent_chars is not None:
-            if abs(paragraph.first_line_indent_chars - 2.0) > _INDENT_TOLERANCE_CHARS:
-                issues.append(
-                    _issue(
-                        "BODY_INDENT",
-                        Severity.WARNING,
-                        "Body paragraph first-line indent should be 2 characters.",
-                        location=_paragraph_location(paragraph),
-                        expected="2 characters",
-                        actual=f"{paragraph.first_line_indent_chars:g} characters",
-                        evidence=text,
-                    )
+        if paragraph.first_line_indent_chars is None:
+            issues.append(
+                _issue(
+                    "BODY_INDENT",
+                    Severity.WARNING,
+                    "Body paragraph first-line indent should be 2 characters.",
+                    location=_paragraph_location(paragraph),
+                    expected="2 characters",
+                    actual="not explicit in paragraph/style metadata",
+                    evidence=text,
                 )
+            )
+        elif abs(paragraph.first_line_indent_chars - 2.0) > _INDENT_TOLERANCE_CHARS:
+            issues.append(
+                _issue(
+                    "BODY_INDENT",
+                    Severity.WARNING,
+                    "Body paragraph first-line indent should be 2 characters.",
+                    location=_paragraph_location(paragraph),
+                    expected="2 characters",
+                    actual=f"{paragraph.first_line_indent_chars:g} characters",
+                    evidence=text,
+                )
+            )
         issues.extend(
             _check_explicit_run_format(
                 paragraph,

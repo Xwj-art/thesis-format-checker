@@ -266,6 +266,22 @@ class ChecksTests(unittest.TestCase):
         self.assertIn("BODY_INDENT", codes)
         self.assertIn("BODY_FONT", codes)
 
+    def test_body_typography_flags_missing_first_line_indent(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="从表6-3可以看出，事实类问题在日期和办事流程线索较强时表现更稳定。",
+            first_line_indent_chars=None,
+            runs=(RunInfo(text="从表6-3可以看出，事实类问题在日期和办事流程线索较强时表现更稳定。", size_pt=12.0),),
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=0, text="第1章 绪论"), paragraph),
+        )
+
+        issues = _check_body_typography(document)
+
+        self.assertTrue(any(issue.code == "BODY_INDENT" for issue in issues))
+
     def test_table_cell_typography_checks_font_size(self) -> None:
         table_paragraph = ParagraphInfo(
             index=1,
