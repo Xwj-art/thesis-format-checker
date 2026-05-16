@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+from zipfile import ZipFile
+import unittest
+
+from thesis_format_checker.docx_reader import DocxReadError, read_docx
+
+from .helpers import build_minimal_docx
+
+
+def _assert_docx_fields_if_present(testcase, document) -> None:
+    if document.paragraphs:
+        testcase.assertGreaterEqual(len(document.paragraphs), 1)
+        testcase.assertEqual(document.paragraphs[0].text, "Thesis body paragraph.")
+
+        first_paragraph = document.paragraphs[0]
+        if first_paragraph.runs:
+            testcase.assertEqual(first_paragraph.runs[0].text, "Thesis body paragraph.")
+            testcase.assertEqual(first_paragraph.runs[0].font_ascii, "Times New Roman")
+            testcase.assertEqual(first_paragraph.runs[0].font_east_asia, "宋体")
+            testcase.assertEqual(first_paragraph.runs[0].size_pt, 12.0)
+            testcase.assertTrue(first_paragraph.runs[0].bold)
+
+    if document.tables:
+        testcase.assertGreaterEqual(len(document.tables), 1)
+        testcase.assertTrue(document.tables[0].rows)
+
+    if document.sections:
+        testcase.assertGreaterEqual(len(document.sections), 1)
+        testcase.assertAlmostEqual(document.sections[0].page_width_cm or 0.0, 21.0, places=2)
+        testcase.assertAlmostEqual(document.sections[0].page_height_cm or 0.0, 29.70, places=2)
+
+    if document.headers:
+        testcase.assertIn("Thesis header", document.headers)
+
+    if document.footers:
+        testcase.assertIn("Thesis footer", document.footers)
+
+
+class DocxReaderTests(unittest.TestCase):
+    def test_read_docx_accepts_minimal_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = build_minimal_docx(Path(tmpdir) / "fixture.docx")
+
+            with ZipFile(docx_path) as archive:
+                self.assertIn("[Content_Types].xml", archive.namelist())
+                self.assertIn("word/document.xml", archive.namelist())
+                self.assertIn("word/header1.xml", archive.namelist())
+                self.assertIn("word/footer1.xml", archive.namelist())
+
+            document = read_docx(docx_path)
+
+            self.assertEqual(document.path, docx_path)
+            _assert_docx_fields_if_present(self, document)
+
+    def test_read_docx_parses_auto_line_spacing_from_style(self) -> None:
+        styles_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+    <w:pPr>
+      <w:spacing w:line="360" w:lineRule="auto"/>
+    </w:pPr>
+  </w:style>
+</w:styles>
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = build_minimal_docx(
+                Path(tmpdir) / "fixture.docx",
+                paragraph_properties_xml='<w:pPr><w:pStyle w:val="Normal"/></w:pPr>',
+                styles_xml=styles_xml,
+            )
+
+            paragraph = read_docx(docx_path).paragraphs[0]
+
+            self.assertIsNone(paragraph.line_spacing_pt)
+            self.assertEqual(paragraph.style_name, "Normal")
+            self.assertEqual(paragraph.line_spacing_rule, "auto")
+            self.assertAlmostEqual(paragraph.line_spacing_multiple or 0.0, 1.5)
+
+    def test_direct_fixed_line_spacing_overrides_style_multiple_spacing(self) -> None:
+        styles_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Normal">
+    <w:pPr>
+      <w:spacing w:line="360" w:lineRule="auto"/>
+    </w:pPr>
+  </w:style>
+</w:styles>
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = build_minimal_docx(
+                Path(tmpdir) / "fixture.docx",
+                paragraph_properties_xml=(
+                    '<w:pPr><w:pStyle w:val="Normal"/>'
+                    '<w:spacing w:line="400" w:lineRule="exact"/></w:pPr>'
+                ),
+                styles_xml=styles_xml,
+            )
+
+            paragraph = read_docx(docx_path).paragraphs[0]
+
+            self.assertEqual(paragraph.line_spacing_rule, "exact")
+            self.assertAlmostEqual(paragraph.line_spacing_pt or 0.0, 20.0)
+            self.assertIsNone(paragraph.line_spacing_multiple)
+
+    def test_read_docx_parses_table_cell_paragraph_spacing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = build_minimal_docx(
+                Path(tmpdir) / "fixture.docx",
+                table_cell_paragraph_properties_xml='<w:pPr><w:spacing w:line="300" w:lineRule="auto"/></w:pPr>',
+            )
+
+            table = read_docx(docx_path).tables[0]
+
+            self.assertEqual(len(table.paragraphs), 1)
+            self.assertEqual(table.paragraphs[0].line_spacing_rule, "auto")
+            self.assertAlmostEqual(table.paragraphs[0].line_spacing_multiple or 0.0, 1.25)
+
+    def test_read_docx_rejects_missing_or_wrong_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+
+            with self.assertRaises(DocxReadError):
+                read_docx(tmpdir_path / "missing.docx")
+
+            bad_path = tmpdir_path / "not-a-docx.txt"
+            bad_path.write_text("not a docx", encoding="utf-8")
+            with self.assertRaises(DocxReadError):
+                read_docx(bad_path)

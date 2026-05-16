@@ -1,0 +1,11 @@
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
+reports/
+samples/*.docx
+samples/*.pdf
+~$*.docx
+毕业论文.docx
+whut毕业论文格式要求初筛.md
