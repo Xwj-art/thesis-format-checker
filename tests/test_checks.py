@@ -10,6 +10,7 @@ from thesis_format_checker.checks import (
     _check_continued_table_layout,
     _check_header_text,
     _check_heading_script_fonts,
+    _check_major_heading_spacing,
     _check_mixed_language_spacing,
     _check_numbering,
     _check_table_borders,
@@ -49,6 +50,33 @@ class ChecksTests(unittest.TestCase):
         issues = _check_header_text(document, rules)
 
         self.assertEqual(issues, [])
+
+    def test_major_heading_spacing_accepts_template_text(self) -> None:
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(
+                ParagraphInfo(index=1, text="摘  要"),
+                ParagraphInfo(index=2, text="目　　录"),
+                ParagraphInfo(index=3, text="参考文献"),
+                ParagraphInfo(index=4, text="致  谢"),
+            ),
+        )
+
+        issues = _check_major_heading_spacing(document)
+
+        self.assertEqual(issues, [])
+
+    def test_major_heading_spacing_flags_half_width_toc_spaces(self) -> None:
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=1, text="目  录"),),
+        )
+
+        issues = _check_major_heading_spacing(document)
+
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0].code, "MAJOR_HEADING_SPACING")
+        self.assertEqual(issues[0].expected, "目　　录")
 
     def test_caption_separator_and_line_spacing_are_checked(self) -> None:
         paragraph = ParagraphInfo(

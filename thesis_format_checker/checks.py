@@ -26,6 +26,12 @@ _TABLE_CAPTION_RE = re.compile(r"^表\s*\d+-\d+(?:\s+|$)")
 _CONTINUED_TABLE_CAPTION_RE = re.compile(r"^续表\s*\d+-\d+(?:\s+|$)")
 _CAPTION_RE = re.compile(r"^(图|表|续表)\s*(\d+-\d+)(\s+)(.+)$")
 _CAPTION_PREFIX_RE = re.compile(r"^(?:图|表|续表)\s*\d+-\d+(?:\s+|$)")
+_MAJOR_HEADING_EXPECTED = {
+    "摘要": "摘  要",
+    "目录": "目　　录",
+    "参考文献": "参考文献",
+    "致谢": "致  谢",
+}
 _REFERENCE_ENTRY_RE = re.compile(r"^\[(\d+)\]")
 _REFERENCE_TYPE_RE = re.compile(r"\[(?:M|J|D|C|R|P|EB/OL|OL|N|S|Z)(?:/[A-Z]+)?\]")
 _KEYWORD_LINE_RE = re.compile(r"^(关键词|Key Words)\s*[：:]\s*(.+)$", re.IGNORECASE)
@@ -754,6 +760,38 @@ def _check_structure_presence(document: DocumentInfo) -> list[Issue]:
             found = needle.replace(" ", "") in normalized
         if not found:
             issues.append(_issue(code, Severity.WARNING, message, expected=needle))
+    return issues
+
+
+def _major_heading_key(text: str) -> str | None:
+    compact = re.sub(r"[\s\u3000]+", "", text.strip())
+    return compact if compact in _MAJOR_HEADING_EXPECTED else None
+
+
+def _check_major_heading_spacing(document: DocumentInfo) -> list[Issue]:
+    issues: list[Issue] = []
+    seen: set[str] = set()
+    for paragraph in document.paragraphs:
+        if _is_toc_paragraph(paragraph):
+            continue
+        text = paragraph.text.strip()
+        key = _major_heading_key(text)
+        if key is None or key in seen:
+            continue
+        seen.add(key)
+        expected = _MAJOR_HEADING_EXPECTED[key]
+        if text != expected:
+            issues.append(
+                _issue(
+                    "MAJOR_HEADING_SPACING",
+                    Severity.WARNING,
+                    "Major heading text spacing does not match the empty template.",
+                    location=_paragraph_location(paragraph),
+                    expected=expected,
+                    actual=text,
+                    evidence=text,
+                )
+            )
     return issues
 
 
@@ -1727,6 +1765,7 @@ def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
     issues.extend(_check_page_settings(document, rules))
     issues.extend(_check_header_text(document, rules))
     issues.extend(_check_static_headers_and_page_numbers(document, rules))
+    issues.extend(_check_major_heading_spacing(document))
     issues.extend(_check_abstract_format(document))
     issues.extend(_check_headings(document))
     issues.extend(_check_heading_script_fonts(document))
@@ -1759,6 +1798,7 @@ def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
             "HEADER_TEXT",
             "STATIC_BODY_HEADER",
             "STATIC_PAGE_FIELD",
+            "MAJOR_HEADING_SPACING",
             "ABSTRACT_FORMAT",
             "HEADING_PUNCTUATION",
             "HEADING_FORMAT",
