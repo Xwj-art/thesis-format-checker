@@ -67,7 +67,12 @@ class TableInfo:
     rows: tuple[tuple[str, ...], ...] = ()
     paragraphs: tuple[ParagraphInfo, ...] = ()
     border_values: tuple[str, ...] = ()
+    border_sizes: tuple[str, ...] = ()
+    header_bottom_border_sizes: tuple[int, ...] = ()
     has_vertical_borders: bool | None = None
+    alignment: str | None = None
+    width_type: str | None = None
+    width_value: int | None = None
 
 
 @dataclass(frozen=True)

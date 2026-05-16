@@ -119,6 +119,42 @@ class DocxReaderTests(unittest.TestCase):
             self.assertEqual(table.paragraphs[0].line_spacing_rule, "auto")
             self.assertAlmostEqual(table.paragraphs[0].line_spacing_multiple or 0.0, 1.25)
 
+    def test_read_docx_parses_table_layout_and_border_widths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_properties_xml = """
+      <w:tblPr>
+        <w:tblW w:w="5000" w:type="pct"/>
+        <w:jc w:val="center"/>
+        <w:tblBorders>
+          <w:top w:val="single" w:sz="18" w:space="0" w:color="auto"/>
+          <w:bottom w:val="single" w:sz="18" w:space="0" w:color="auto"/>
+          <w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>
+          <w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>
+        </w:tblBorders>
+      </w:tblPr>
+"""
+            first_row_cell_properties_xml = """
+          <w:tcPr>
+            <w:tcBorders>
+              <w:bottom w:val="single" w:sz="6" w:space="0" w:color="auto"/>
+            </w:tcBorders>
+          </w:tcPr>
+"""
+            docx_path = build_minimal_docx(
+                Path(tmpdir) / "fixture.docx",
+                table_properties_xml=table_properties_xml,
+                first_row_cell_properties_xml=first_row_cell_properties_xml,
+            )
+
+            table = read_docx(docx_path).tables[0]
+
+            self.assertEqual(table.width_type, "pct")
+            self.assertEqual(table.width_value, 5000)
+            self.assertEqual(table.alignment, "center")
+            self.assertIn("top=18", table.border_sizes)
+            self.assertIn("bottom=18", table.border_sizes)
+            self.assertEqual(table.header_bottom_border_sizes, (6,))
+
     def test_read_docx_rejects_missing_or_wrong_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)

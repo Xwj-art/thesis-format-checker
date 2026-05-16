@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .checks import run_checks
 from .docx_reader import DocxReadError, read_docx
-from .model import Severity
+from .model import CheckResult, Issue, Severity
 from .report import render_markdown_report
 from .rendered_pdf import run_rendered_pdf_checks
 from .rules import load_rules
@@ -116,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
         if pdf_path is not None:
             pdf_result = run_rendered_pdf_checks(pdf_path, rules)
             result = _merge_results(result, pdf_result)
+        else:
+            result = _add_rendered_pdf_missing_notice(result, rules)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(render_markdown_report(document, rules, result), encoding="utf-8")
     except DocxReadError as exc:
@@ -136,13 +138,36 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _merge_results(left, right):
-    from .model import CheckResult
-
+def _merge_results(left: CheckResult, right: CheckResult) -> CheckResult:
     return CheckResult(
         issues=tuple(left.issues) + tuple(right.issues),
         checked_items=tuple(left.checked_items) + tuple(
             item for item in right.checked_items if item not in left.checked_items
         ),
         unsupported_items=tuple(left.unsupported_items),
+    )
+
+
+def _add_rendered_pdf_missing_notice(result: CheckResult, rules) -> CheckResult:
+    if not rules.expected_header_text:
+        return result
+
+    notice = Issue(
+        code="RENDERED_HEADER_CHECK_SKIPPED",
+        severity=Severity.WARNING,
+        message=(
+            "Rendered page header check was not run; provide --rendered-pdf to verify "
+            "body-page headers and page numbers after Word/WPS pagination."
+        ),
+        expected=f"--rendered-pdf with header `{rules.expected_header_text}` on body pages",
+        actual="not provided",
+    )
+    unsupported_item = "rendered body-page header/page-number validation requires --rendered-pdf"
+    unsupported_items = tuple(result.unsupported_items)
+    if unsupported_item not in unsupported_items:
+        unsupported_items = unsupported_items + (unsupported_item,)
+    return CheckResult(
+        issues=tuple(result.issues) + (notice,),
+        checked_items=tuple(result.checked_items),
+        unsupported_items=unsupported_items,
     )

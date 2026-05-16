@@ -9,16 +9,21 @@ _PAGE_TOLERANCE_CM = 0.1
 _LINE_SPACING_TOLERANCE_PT = 0.5
 _FONT_SIZE_TOLERANCE_PT = 0.25
 _INDENT_TOLERANCE_CHARS = 0.25
+_TEMPLATE_TABLE_WIDTH_TYPE = "pct"
+_TEMPLATE_TABLE_WIDTH_VALUE = 5000
+_TEMPLATE_TABLE_ALIGNMENT = "center"
+_TEMPLATE_TABLE_OUTER_BORDER_SIZE = 18
+_TEMPLATE_TABLE_HEADER_BOTTOM_BORDER_SIZE = 6
 _PUNCTUATION_SUFFIX = "：:。.;；、,，!！?？"
 _HEADING_CHAPTER_RE = re.compile(r"^第\s*\d+\s*章(?:\s+.+)?$")
 _HEADING_LEVEL1_RE = re.compile(r"^\d+\.\d+(?:\s+.+)?$")
 _HEADING_LEVEL2_RE = re.compile(r"^\d+\.\d+\.\d+(?:\s+.+)?$")
 _FIGURE_DOT_RE = re.compile(r"图\s*\d+\.\d+")
 _TABLE_DOT_RE = re.compile(r"表\s*\d+\.\d+")
-_EQUATION_DOT_RE = re.compile(r"[（(]\s*\d+\.\d+\s*[）)]")
-_FIGURE_CAPTION_RE = re.compile(r"^图\s*\d+-\d+")
-_TABLE_CAPTION_RE = re.compile(r"^表\s*\d+-\d+")
-_CONTINUED_TABLE_CAPTION_RE = re.compile(r"^续表\s*\d+-\d+")
+_EQUATION_DOT_RE = re.compile(r"[（(]\s*[1-9]\d{0,1}\.\d{1,2}\s*[）)]")
+_FIGURE_CAPTION_RE = re.compile(r"^图\s*\d+-\d+(?:\s+|$)")
+_TABLE_CAPTION_RE = re.compile(r"^表\s*\d+-\d+(?:\s+|$)")
+_CONTINUED_TABLE_CAPTION_RE = re.compile(r"^续表\s*\d+-\d+(?:\s+|$)")
 _CAPTION_RE = re.compile(r"^(图|表|续表)\s*(\d+-\d+)(\s+)(.+)$")
 _CAPTION_PREFIX_RE = re.compile(r"^(?:图|表|续表)\s*\d+-\d+(?:\s+|$)")
 _REFERENCE_ENTRY_RE = re.compile(r"^\[(\d+)\]")
@@ -902,6 +907,72 @@ def _check_table_borders(document: DocumentInfo) -> list[Issue]:
                     evidence=", ".join(table.border_values[:12]),
                 )
             )
+        issues.extend(_check_table_template_layout(table))
+    return issues
+
+
+def _check_table_template_layout(table: TableInfo) -> list[Issue]:
+    issues: list[Issue] = []
+    if table.width_type != _TEMPLATE_TABLE_WIDTH_TYPE or table.width_value != _TEMPLATE_TABLE_WIDTH_VALUE:
+        issues.append(
+            _issue(
+                "TABLE_WIDTH",
+                Severity.WARNING,
+                "Table width does not match the empty template.",
+                location=f"table {table.index}",
+                expected="100% page text width (w:tblW type=pct w=5000)",
+                actual=f"type={table.width_type or 'not explicit'} w={table.width_value or 'not explicit'}",
+            )
+        )
+    if table.alignment != _TEMPLATE_TABLE_ALIGNMENT:
+        issues.append(
+            _issue(
+                "TABLE_ALIGNMENT",
+                Severity.WARNING,
+                "Table alignment does not match the empty template.",
+                location=f"table {table.index}",
+                expected="center",
+                actual=table.alignment or "not explicit",
+            )
+        )
+
+    border_sizes = _table_border_size_map(table)
+    for border_name in ("top", "bottom"):
+        actual_size = border_sizes.get(border_name)
+        if actual_size != _TEMPLATE_TABLE_OUTER_BORDER_SIZE:
+            issues.append(
+                _issue(
+                    "TABLE_BORDER_WIDTH",
+                    Severity.WARNING,
+                    "Table outer border width does not match the empty template.",
+                    location=f"table {table.index}",
+                    expected=f"{_TEMPLATE_TABLE_OUTER_BORDER_SIZE} eighths of a point (2.25 pt)",
+                    actual=(
+                        _format_border_size(actual_size)
+                        if actual_size is not None
+                        else f"{border_name} border size not explicit"
+                    ),
+                    evidence=", ".join(table.border_sizes[:8]),
+                )
+            )
+
+    expected_header_cells = max((len(row) for row in table.rows[:1]), default=0)
+    header_sizes = table.header_bottom_border_sizes
+    if (
+        not header_sizes
+        or len(header_sizes) < expected_header_cells
+        or any(size != _TEMPLATE_TABLE_HEADER_BOTTOM_BORDER_SIZE for size in header_sizes)
+    ):
+        issues.append(
+            _issue(
+                "TABLE_HEADER_BORDER",
+                Severity.WARNING,
+                "Table header bottom border width does not match the empty template.",
+                location=f"table {table.index}",
+                expected=f"{_TEMPLATE_TABLE_HEADER_BOTTOM_BORDER_SIZE} eighths of a point (0.75 pt) on each header cell",
+                actual=", ".join(_format_border_size(size) for size in header_sizes) if header_sizes else "not explicit",
+            )
+        )
     return issues
 
 
@@ -923,6 +994,23 @@ def _visible_table_border_names(table: TableInfo) -> set[str]:
         if value not in {"nil", "none"}:
             visible.add(name)
     return visible
+
+
+def _table_border_size_map(table: TableInfo) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for item in table.border_sizes:
+        if "=" not in item:
+            continue
+        name, value = item.split("=", 1)
+        try:
+            result[name] = int(value)
+        except ValueError:
+            continue
+    return result
+
+
+def _format_border_size(size: int) -> str:
+    return f"{size} eighths of a point ({size / 8:g} pt)"
 
 
 def _caption_paragraphs(document: DocumentInfo) -> list[tuple[ParagraphInfo, str]]:
@@ -1674,6 +1762,10 @@ def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
             "TOC_FIELD",
             "TABLE_BORDER",
             "TABLE_THREE_LINE",
+            "TABLE_BORDER_WIDTH",
+            "TABLE_HEADER_BORDER",
+            "TABLE_WIDTH",
+            "TABLE_ALIGNMENT",
             "CAPTION_SEPARATOR",
             "CAPTION_FORMAT",
             "CAPTION_LINE_SPACING",

@@ -6,10 +6,12 @@ import unittest
 from thesis_format_checker.checks import (
     _check_body_typography,
     _check_captions,
+    _check_caption_object_order,
     _check_continued_table_layout,
     _check_header_text,
     _check_heading_script_fonts,
     _check_mixed_language_spacing,
+    _check_numbering,
     _check_table_borders,
     _check_table_cell_typography,
 )
@@ -134,6 +136,50 @@ class ChecksTests(unittest.TestCase):
         issues = _check_mixed_language_spacing(document)
 
         self.assertEqual(issues, [])
+
+    def test_numbering_ignores_metric_decimals_in_parentheses(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="Sparse-only取得最高检索指标（Hit@5=0.8597），Hybrid次之（0.8489）。",
+        )
+
+        issues = _check_numbering(paragraph)
+
+        self.assertFalse(any(issue.code == "EQUATION_NUMBERING" for issue in issues))
+
+    def test_numbering_flags_dot_style_equation_numbers(self) -> None:
+        paragraph = ParagraphInfo(index=1, text="E = mc^2 （6.1）")
+
+        issues = _check_numbering(paragraph)
+
+        self.assertTrue(any(issue.code == "EQUATION_NUMBERING" for issue in issues))
+
+    def test_table_caption_position_ignores_body_references(self) -> None:
+        paragraph = ParagraphInfo(index=2, block_index=2, text="表6-4进一步说明，不同检索方案的差异并不只来自总体指标。")
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=0, block_index=0, text="第1章 绪论"), paragraph),
+            tables=(
+                TableInfo(index=1, block_index=1, rows=(("字段", "说明"),)),
+                TableInfo(index=2, block_index=10, rows=(("字段", "说明"),)),
+            ),
+        )
+
+        issues = _check_caption_object_order(document)
+
+        self.assertEqual(issues, [])
+
+    def test_table_caption_position_still_checks_real_captions(self) -> None:
+        paragraph = ParagraphInfo(index=2, block_index=2, text="表6-4 端到端回答小规模人工评测结果")
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=0, block_index=0, text="第1章 绪论"), paragraph),
+            tables=(TableInfo(index=1, block_index=1, rows=(("字段", "说明"),)),),
+        )
+
+        issues = _check_caption_object_order(document)
+
+        self.assertTrue(any(issue.code == "TABLE_CAPTION_POSITION" for issue in issues))
 
     def test_continued_table_layout_accepts_split_table_with_repeated_header(self) -> None:
         paragraph = ParagraphInfo(index=1, block_index=2, text="续表3-6  订单表结构设计")
@@ -274,8 +320,60 @@ class ChecksTests(unittest.TestCase):
 
         issues = _check_table_borders(document)
 
-        self.assertEqual(len(issues), 1)
-        self.assertEqual(issues[0].code, "TABLE_THREE_LINE")
+        codes = {issue.code for issue in issues}
+        self.assertIn("TABLE_THREE_LINE", codes)
+
+    def test_table_border_check_accepts_empty_template_table_layout(self) -> None:
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=0, block_index=0, text="第1章 绪论"),),
+            tables=(
+                TableInfo(
+                    index=1,
+                    block_index=1,
+                    rows=(("字段", "说明"), ("name", "商品名称")),
+                    border_values=("top=single", "bottom=single", "insideH=none", "insideV=none"),
+                    border_sizes=("top=18", "bottom=18"),
+                    header_bottom_border_sizes=(6, 6),
+                    has_vertical_borders=False,
+                    alignment="center",
+                    width_type="pct",
+                    width_value=5000,
+                ),
+            ),
+        )
+
+        issues = _check_table_borders(document)
+
+        self.assertEqual(issues, [])
+
+    def test_table_border_check_flags_template_layout_mismatches(self) -> None:
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=0, block_index=0, text="第1章 绪论"),),
+            tables=(
+                TableInfo(
+                    index=1,
+                    block_index=1,
+                    rows=(("字段", "说明"), ("name", "商品名称")),
+                    border_values=("top=single", "bottom=single", "insideH=none", "insideV=none"),
+                    border_sizes=("top=12", "bottom=18"),
+                    header_bottom_border_sizes=(4, 6),
+                    has_vertical_borders=False,
+                    alignment="left",
+                    width_type="dxa",
+                    width_value=8000,
+                ),
+            ),
+        )
+
+        issues = _check_table_borders(document)
+        codes = {issue.code for issue in issues}
+
+        self.assertIn("TABLE_WIDTH", codes)
+        self.assertIn("TABLE_ALIGNMENT", codes)
+        self.assertIn("TABLE_BORDER_WIDTH", codes)
+        self.assertIn("TABLE_HEADER_BORDER", codes)
 
     def test_table_border_check_ignores_single_row_layout_tables(self) -> None:
         document = DocumentInfo(

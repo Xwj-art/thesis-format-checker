@@ -392,17 +392,27 @@ def _parse_table(element: ET.Element, index: int, block_index: int, style_data: 
             for paragraph in cell.iter(_qn("w:p")):
                 paragraphs.append(_parse_paragraph(paragraph, len(paragraphs), block_index, style_data))
         rows.append(tuple(cells))
+    tbl_pr = element.find("w:tblPr", NS)
+    tbl_w = tbl_pr.find("w:tblW", NS) if tbl_pr is not None else None
+    tbl_jc = tbl_pr.find("w:jc", NS) if tbl_pr is not None else None
     borders = _table_border_values(element)
     vertical_names = {"left", "right", "start", "end", "insideV"}
     has_vertical = any(name in vertical_names and value not in {"nil", "none"} for name, value in borders)
     border_values = tuple(f"{name}={value}" for name, value in borders)
+    table_border_sizes = _direct_table_border_sizes(element)
+    header_bottom_sizes = _header_bottom_border_sizes(element)
     return TableInfo(
         index=index,
         block_index=block_index,
         rows=tuple(rows),
         paragraphs=tuple(paragraphs),
         border_values=border_values,
+        border_sizes=tuple(f"{name}={size}" for name, size in table_border_sizes),
+        header_bottom_border_sizes=tuple(header_bottom_sizes),
         has_vertical_borders=has_vertical if borders else None,
+        alignment=_attr_val(tbl_jc, "val"),
+        width_type=_attr_val(tbl_w, "type"),
+        width_value=_attr_int(tbl_w, "w"),
     )
 
 
@@ -450,6 +460,37 @@ def _table_border_values(element: ET.Element) -> list[tuple[str, str]]:
             value = _attr_val(border, "val")
             if value:
                 values.append((name, value))
+    return values
+
+
+def _direct_table_border_sizes(element: ET.Element) -> list[tuple[str, int]]:
+    values: list[tuple[str, int]] = []
+    borders = element.find("w:tblPr/w:tblBorders", NS)
+    if borders is None:
+        return values
+    for border in list(borders):
+        if not border.tag.startswith("{"):
+            continue
+        name = border.tag.rsplit("}", 1)[-1]
+        value = _attr_val(border, "val")
+        size = _attr_int(border, "sz")
+        if value in {"nil", "none"} or size is None:
+            continue
+        values.append((name, size))
+    return values
+
+
+def _header_bottom_border_sizes(element: ET.Element) -> list[int]:
+    first_row = element.find("w:tr", NS)
+    if first_row is None:
+        return []
+    values: list[int] = []
+    for cell in first_row.findall("w:tc", NS):
+        bottom = cell.find("w:tcPr/w:tcBorders/w:bottom", NS)
+        value = _attr_val(bottom, "val")
+        size = _attr_int(bottom, "sz")
+        if value not in {"nil", "none"} and size is not None:
+            values.append(size)
     return values
 
 

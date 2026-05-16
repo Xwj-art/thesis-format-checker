@@ -50,3 +50,31 @@ class CliSmokeTests(unittest.TestCase):
             self.assertEqual(exit_code, 2)
             self.assertEqual(stdout.getvalue(), "")
             self.assertIn("error:", stderr.getvalue())
+
+    def test_main_warns_when_rendered_header_check_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            expected_header = "武汉理工大学本科毕业设计（论文）"
+            rules_path = tmpdir_path / "rules.md"
+            rules_path.write_text(
+                f"# Requirements\n\n- 正文页眉内容：`{expected_header}`。\n",
+                encoding="utf-8",
+            )
+            docx_path = build_minimal_docx(
+                tmpdir_path / "thesis.docx",
+                header_text=expected_header,
+            )
+            output_path = tmpdir_path / "reports" / "report.md"
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                exit_code = main([str(rules_path), str(docx_path), "--output", str(output_path)])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(stderr.getvalue(), "")
+
+            report = output_path.read_text(encoding="utf-8")
+            self.assertNotIn("`HEADER_TEXT`", report)
+            self.assertIn("`RENDERED_HEADER_CHECK_SKIPPED`", report)
+            self.assertIn("requires --rendered-pdf", report)

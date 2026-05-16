@@ -21,6 +21,8 @@ def build_minimal_docx(
     header_text: str = "Thesis header",
     footer_text: str = "Thesis footer",
     paragraph_properties_xml: str = "",
+    table_properties_xml: str = "",
+    first_row_cell_properties_xml: str = "",
     table_cell_paragraph_properties_xml: str = "",
     styles_xml: str | None = None,
 ) -> Path:
@@ -43,8 +45,10 @@ def build_minimal_docx(
       </w:r>
     </w:p>
     <w:tbl>
+      {table_properties_xml}
       <w:tr>
         <w:tc>
+          {first_row_cell_properties_xml}
           <w:p>
             {table_cell_paragraph_properties_xml}
             <w:r>
