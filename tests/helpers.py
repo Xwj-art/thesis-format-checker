@@ -23,6 +23,7 @@ def build_minimal_docx(
     paragraph_properties_xml: str = "",
     table_properties_xml: str = "",
     first_row_cell_properties_xml: str = "",
+    table_extra_rows_xml: str = "",
     table_cell_paragraph_properties_xml: str = "",
     styles_xml: str | None = None,
 ) -> Path:
@@ -57,6 +58,7 @@ def build_minimal_docx(
           </w:p>
         </w:tc>
       </w:tr>
+      {table_extra_rows_xml}
     </w:tbl>
     <w:sectPr>
       <w:pgSz w:w="11906" w:h="16838"/>

@@ -56,6 +56,9 @@ class SectionInfo:
     page_number_start: int | None = None
     page_number_format: str | None = None
     header_texts: tuple[str, ...] = ()
+    header_border_positions: tuple[str, ...] = ()
+    header_bottom_border_sizes: tuple[int, ...] = ()
+    header_bottom_border_spaces: tuple[int, ...] = ()
     footer_texts: tuple[str, ...] = ()
     footer_field_instructions: tuple[str, ...] = ()
 
@@ -68,6 +71,8 @@ class TableInfo:
     paragraphs: tuple[ParagraphInfo, ...] = ()
     border_values: tuple[str, ...] = ()
     border_sizes: tuple[str, ...] = ()
+    horizontal_line_count: int | None = None
+    horizontal_line_positions: tuple[str, ...] = ()
     header_bottom_border_sizes: tuple[int, ...] = ()
     has_vertical_borders: bool | None = None
     alignment: str | None = None

@@ -13,10 +13,11 @@ from thesis_format_checker.checks import (
     _check_major_heading_spacing,
     _check_mixed_language_spacing,
     _check_numbering,
+    _check_static_headers_and_page_numbers,
     _check_table_borders,
     _check_table_cell_typography,
 )
-from thesis_format_checker.model import DocumentInfo, ParagraphInfo, RuleSet, RunInfo, TableInfo
+from thesis_format_checker.model import DocumentInfo, ParagraphInfo, RuleSet, RunInfo, SectionInfo, Severity, TableInfo
 
 
 class ChecksTests(unittest.TestCase):
@@ -50,6 +51,56 @@ class ChecksTests(unittest.TestCase):
         issues = _check_header_text(document, rules)
 
         self.assertEqual(issues, [])
+
+    def test_static_header_line_accepts_template_bottom_border(self) -> None:
+        rules = RuleSet(
+            source_path=Path("rules.md"),
+            raw_markdown="",
+            expected_header_text="武汉理工大学本科毕业设计（论文）",
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            sections=(
+                SectionInfo(
+                    index=0,
+                    header_texts=("武汉理工大学本科毕业设计（论文）",),
+                    header_border_positions=("bottom",),
+                    header_bottom_border_sizes=(6,),
+                    header_bottom_border_spaces=(1,),
+                ),
+            ),
+        )
+
+        issues = _check_static_headers_and_page_numbers(document, rules)
+
+        codes = {issue.code for issue in issues}
+        self.assertNotIn("HEADER_LINE_POSITION", codes)
+        self.assertNotIn("HEADER_LINE_WIDTH", codes)
+
+    def test_static_header_line_flags_wrong_position_and_width(self) -> None:
+        rules = RuleSet(
+            source_path=Path("rules.md"),
+            raw_markdown="",
+            expected_header_text="武汉理工大学本科毕业设计（论文）",
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            sections=(
+                SectionInfo(
+                    index=0,
+                    header_texts=("武汉理工大学本科毕业设计（论文）",),
+                    header_border_positions=("top",),
+                    header_bottom_border_sizes=(4,),
+                    header_bottom_border_spaces=(2,),
+                ),
+            ),
+        )
+
+        issues = _check_static_headers_and_page_numbers(document, rules)
+        codes = {issue.code for issue in issues}
+
+        self.assertIn("HEADER_LINE_POSITION", codes)
+        self.assertIn("HEADER_LINE_WIDTH", codes)
 
     def test_major_heading_spacing_accepts_template_text(self) -> None:
         document = DocumentInfo(
@@ -256,6 +307,21 @@ class ChecksTests(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].code, "HEADING_SCRIPT_FONT")
 
+    def test_heading_script_font_accepts_word_font_aliases(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="4.9 RAG实现",
+            runs=(
+                RunInfo(text="4.9 RAG", font_ascii="Times New Roman", font_east_asia="SimHei", size_pt=16.0),
+                RunInfo(text="实现", font_ascii="Times New Roman", font_east_asia="SimHei", size_pt=16.0),
+            ),
+        )
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_heading_script_fonts(document)
+
+        self.assertEqual(issues, [])
+
     def test_heading_script_font_uses_word_heading_style_name(self) -> None:
         paragraph = ParagraphInfo(
             index=1,
@@ -378,6 +444,8 @@ class ChecksTests(unittest.TestCase):
                     rows=(("字段", "说明"), ("name", "商品名称")),
                     border_values=("top=single", "bottom=single", "insideH=none", "insideV=none"),
                     border_sizes=("top=18", "bottom=18"),
+                    horizontal_line_count=3,
+                    horizontal_line_positions=("top", "after row 1", "bottom"),
                     header_bottom_border_sizes=(6, 6),
                     has_vertical_borders=False,
                     alignment="center",
@@ -390,6 +458,32 @@ class ChecksTests(unittest.TestCase):
         issues = _check_table_borders(document)
 
         self.assertEqual(issues, [])
+
+    def test_table_border_check_flags_extra_horizontal_lines(self) -> None:
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=0, block_index=0, text="第1章 绪论"),),
+            tables=(
+                TableInfo(
+                    index=1,
+                    block_index=1,
+                    rows=(("字段", "说明"), ("name", "商品名称"), ("price", "价格")),
+                    border_values=("top=single", "bottom=single", "insideH=single", "insideV=none"),
+                    border_sizes=("top=18", "bottom=18"),
+                    horizontal_line_count=4,
+                    horizontal_line_positions=("top", "after row 1", "after row 2", "bottom"),
+                    header_bottom_border_sizes=(6, 6),
+                    has_vertical_borders=False,
+                    alignment="center",
+                    width_type="pct",
+                    width_value=5000,
+                ),
+            ),
+        )
+
+        issues = _check_table_borders(document)
+
+        self.assertTrue(any(issue.code == "TABLE_LINE_COUNT" for issue in issues))
 
     def test_table_border_check_flags_template_layout_mismatches(self) -> None:
         document = DocumentInfo(
@@ -414,10 +508,10 @@ class ChecksTests(unittest.TestCase):
         issues = _check_table_borders(document)
         codes = {issue.code for issue in issues}
 
-        self.assertIn("TABLE_WIDTH", codes)
         self.assertIn("TABLE_ALIGNMENT", codes)
         self.assertIn("TABLE_BORDER_WIDTH", codes)
         self.assertIn("TABLE_HEADER_BORDER", codes)
+        self.assertTrue(any(issue.code == "TABLE_WIDTH" and issue.severity is Severity.INFO for issue in issues))
 
     def test_table_border_check_ignores_single_row_layout_tables(self) -> None:
         document = DocumentInfo(

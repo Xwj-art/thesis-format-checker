@@ -34,7 +34,7 @@ def read_docx(path: str | Path) -> DocumentInfo:
                 raise DocxReadError(f"{docx_path}: {exc}") from exc
             styles = _parse_styles(archive)
             relationships = _parse_document_relationships(archive)
-            part_cache: dict[str, tuple[str, tuple[str, ...]]] = {}
+            part_cache: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], tuple[int, ...], tuple[int, ...]]] = {}
 
             paragraphs: list[ParagraphInfo] = []
             sections: list[SectionInfo] = []
@@ -50,11 +50,13 @@ def read_docx(path: str | Path) -> DocumentInfo:
                     paragraphs.append(paragraph)
                     sect_pr = child.find("w:pPr/w:sectPr", NS)
                     if sect_pr is not None:
-                        sections.append(_parse_section(sect_pr, len(sections), archive, relationships, part_cache))
+                        sections.append(
+                            _parse_section(sect_pr, len(sections), archive, relationships, part_cache, styles)
+                        )
                 elif child.tag == _qn("w:tbl"):
                     tables.append(_parse_table(child, len(tables), block_index, styles))
                 elif child.tag == _qn("w:sectPr"):
-                    sections.append(_parse_section(child, len(sections), archive, relationships, part_cache))
+                    sections.append(_parse_section(child, len(sections), archive, relationships, part_cache, styles))
 
             headers = _parse_package_parts(archive, "word/header")
             footers = _parse_package_parts(archive, "word/footer")
@@ -62,7 +64,7 @@ def read_docx(path: str | Path) -> DocumentInfo:
             if not sections:
                 body_sect_pr = body.find("w:sectPr", NS)
                 if body_sect_pr is not None:
-                    sections.append(_parse_section(body_sect_pr, 0, archive, relationships, part_cache))
+                    sections.append(_parse_section(body_sect_pr, 0, archive, relationships, part_cache, styles))
 
             return DocumentInfo(
                 path=docx_path,
@@ -135,16 +137,18 @@ def _parse_document_relationships(archive: zipfile.ZipFile) -> dict[str, str]:
 def _read_part_text_and_fields(
     archive: zipfile.ZipFile,
     member: str,
-    cache: dict[str, tuple[str, tuple[str, ...]]],
-) -> tuple[str, tuple[str, ...]]:
+    cache: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], tuple[int, ...], tuple[int, ...]]],
+    style_data: dict[str, Any],
+) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[int, ...], tuple[int, ...]]:
     if member in cache:
         return cache[member]
     try:
         root = ET.fromstring(archive.read(member))
     except KeyError:
-        result = ("", ())
+        result = ("", (), (), (), ())
     else:
-        result = (_collect_text(root), _field_instructions(root))
+        positions, sizes, spaces = _paragraph_border_metadata(root, style_data)
+        result = (_collect_text(root), _field_instructions(root), positions, sizes, spaces)
     cache[member] = result
     return result
 
@@ -236,6 +240,10 @@ def _paragraph_props(p_pr: ET.Element | None) -> dict[str, Any]:
     ind = p_pr.find("w:ind", NS)
     if ind is not None:
         props["first_line_indent_chars"] = _first_line_indent_chars(ind, None)
+    bottom_border = p_pr.find("w:pBdr/w:bottom", NS)
+    if _is_visible_border(bottom_border):
+        props["bottom_border_size"] = _attr_int(bottom_border, "sz")
+        props["bottom_border_space"] = _attr_int(bottom_border, "space")
     return props
 
 
@@ -248,6 +256,39 @@ def _run_props(r_pr: ET.Element | None) -> dict[str, Any]:
         "size_pt": _font_size_pt(r_pr),
         "bold": _bool_prop(r_pr.find("w:b", NS)),
     }
+
+
+def _paragraph_border_metadata(
+    root: ET.Element,
+    style_data: dict[str, Any],
+) -> tuple[tuple[str, ...], tuple[int, ...], tuple[int, ...]]:
+    positions: list[str] = []
+    bottom_sizes: list[int] = []
+    bottom_spaces: list[int] = []
+    for paragraph in root.findall(".//w:p", NS):
+        p_pr = paragraph.find("w:pPr", NS)
+        style = _attr_val(p_pr.find("w:pStyle", NS), "val") if p_pr is not None else None
+        style_props = _resolve_style_props(style, style_data)
+        p_bdr = p_pr.find("w:pBdr", NS) if p_pr is not None else None
+        paragraph_positions: set[str] = set()
+        for position in ("top", "bottom"):
+            border = p_bdr.find(f"w:{position}", NS) if p_bdr is not None else None
+            if _is_visible_border(border):
+                positions.append(position)
+                paragraph_positions.add(position)
+                if position == "bottom":
+                    size = _attr_int(border, "sz")
+                    space = _attr_int(border, "space")
+                    if size is not None:
+                        bottom_sizes.append(size)
+                    if space is not None:
+                        bottom_spaces.append(space)
+        if "bottom" not in paragraph_positions and style_props.get("bottom_border_size") is not None:
+            positions.append("bottom")
+            bottom_sizes.append(style_props["bottom_border_size"])
+            if style_props.get("bottom_border_space") is not None:
+                bottom_spaces.append(style_props["bottom_border_space"])
+    return tuple(positions), tuple(bottom_sizes), tuple(bottom_spaces)
 
 
 def _parse_paragraph(
@@ -343,25 +384,36 @@ def _parse_section(
     index: int,
     archive: zipfile.ZipFile,
     relationships: dict[str, str],
-    part_cache: dict[str, tuple[str, tuple[str, ...]]],
+    part_cache: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], tuple[int, ...], tuple[int, ...]]],
+    style_data: dict[str, Any],
 ) -> SectionInfo:
     pg_sz = element.find("w:pgSz", NS)
     pg_mar = element.find("w:pgMar", NS)
     pg_num_type = element.find("w:pgNumType", NS)
     header_texts: list[str] = []
+    header_border_positions: list[str] = []
+    header_bottom_border_sizes: list[int] = []
+    header_bottom_border_spaces: list[int] = []
     footer_texts: list[str] = []
     footer_fields: list[str] = []
     for header_ref in element.findall("w:headerReference", NS):
         rel_id = header_ref.get(f"{{{NS['r']}}}id")
         member = relationships.get(rel_id or "")
         if member:
-            text, _fields = _read_part_text_and_fields(archive, member, part_cache)
+            text, _fields, positions, bottom_sizes, bottom_spaces = _read_part_text_and_fields(
+                archive, member, part_cache, style_data
+            )
             header_texts.append(text)
+            header_border_positions.extend(positions)
+            header_bottom_border_sizes.extend(bottom_sizes)
+            header_bottom_border_spaces.extend(bottom_spaces)
     for footer_ref in element.findall("w:footerReference", NS):
         rel_id = footer_ref.get(f"{{{NS['r']}}}id")
         member = relationships.get(rel_id or "")
         if member:
-            text, fields = _read_part_text_and_fields(archive, member, part_cache)
+            text, fields, _positions, _bottom_sizes, _bottom_spaces = _read_part_text_and_fields(
+                archive, member, part_cache, style_data
+            )
             footer_texts.append(text)
             footer_fields.extend(fields)
     return SectionInfo(
@@ -377,6 +429,9 @@ def _parse_section(
         page_number_start=_attr_int(pg_num_type, "start") if pg_num_type is not None else None,
         page_number_format=_attr_val(pg_num_type, "fmt") if pg_num_type is not None else None,
         header_texts=tuple(header_texts),
+        header_border_positions=tuple(header_border_positions),
+        header_bottom_border_sizes=tuple(header_bottom_border_sizes),
+        header_bottom_border_spaces=tuple(header_bottom_border_spaces),
         footer_texts=tuple(footer_texts),
         footer_field_instructions=tuple(footer_fields),
     )
@@ -400,6 +455,7 @@ def _parse_table(element: ET.Element, index: int, block_index: int, style_data: 
     has_vertical = any(name in vertical_names and value not in {"nil", "none"} for name, value in borders)
     border_values = tuple(f"{name}={value}" for name, value in borders)
     table_border_sizes = _direct_table_border_sizes(element)
+    horizontal_line_positions = _horizontal_line_positions(element)
     header_bottom_sizes = _header_bottom_border_sizes(element)
     return TableInfo(
         index=index,
@@ -408,6 +464,8 @@ def _parse_table(element: ET.Element, index: int, block_index: int, style_data: 
         paragraphs=tuple(paragraphs),
         border_values=border_values,
         border_sizes=tuple(f"{name}={size}" for name, size in table_border_sizes),
+        horizontal_line_count=len(horizontal_line_positions),
+        horizontal_line_positions=tuple(horizontal_line_positions),
         header_bottom_border_sizes=tuple(header_bottom_sizes),
         has_vertical_borders=has_vertical if borders else None,
         alignment=_attr_val(tbl_jc, "val"),
@@ -478,6 +536,46 @@ def _direct_table_border_sizes(element: ET.Element) -> list[tuple[str, int]]:
             continue
         values.append((name, size))
     return values
+
+
+def _horizontal_line_positions(element: ET.Element) -> list[str]:
+    rows = element.findall("w:tr", NS)
+    if not rows:
+        return []
+    positions: set[int] = set()
+    borders = element.find("w:tblPr/w:tblBorders", NS)
+    if _is_visible_border(borders.find("w:top", NS) if borders is not None else None):
+        positions.add(0)
+    if _is_visible_border(borders.find("w:bottom", NS) if borders is not None else None):
+        positions.add(len(rows))
+    if _is_visible_border(borders.find("w:insideH", NS) if borders is not None else None):
+        positions.update(range(1, len(rows)))
+
+    for row_index, row in enumerate(rows):
+        for cell in row.findall("w:tc", NS):
+            cell_borders = cell.find("w:tcPr/w:tcBorders", NS)
+            if cell_borders is None:
+                continue
+            if _is_visible_border(cell_borders.find("w:top", NS)):
+                positions.add(row_index)
+            if _is_visible_border(cell_borders.find("w:bottom", NS)):
+                positions.add(row_index + 1)
+    return [_line_position_label(position, len(rows)) for position in sorted(positions)]
+
+
+def _line_position_label(position: int, row_count: int) -> str:
+    if position == 0:
+        return "top"
+    if position == row_count:
+        return "bottom"
+    return f"after row {position}"
+
+
+def _is_visible_border(element: ET.Element | None) -> bool:
+    if element is None:
+        return False
+    value = _attr_val(element, "val")
+    return value not in {None, "nil", "none"}
 
 
 def _header_bottom_border_sizes(element: ET.Element) -> list[int]:

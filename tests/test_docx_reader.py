@@ -140,10 +140,22 @@ class DocxReaderTests(unittest.TestCase):
             </w:tcBorders>
           </w:tcPr>
 """
+            table_extra_rows_xml = """
+      <w:tr>
+        <w:tc>
+          <w:p>
+            <w:r>
+              <w:t>Second row</w:t>
+            </w:r>
+          </w:p>
+        </w:tc>
+      </w:tr>
+"""
             docx_path = build_minimal_docx(
                 Path(tmpdir) / "fixture.docx",
                 table_properties_xml=table_properties_xml,
                 first_row_cell_properties_xml=first_row_cell_properties_xml,
+                table_extra_rows_xml=table_extra_rows_xml,
             )
 
             table = read_docx(docx_path).tables[0]
@@ -153,6 +165,8 @@ class DocxReaderTests(unittest.TestCase):
             self.assertEqual(table.alignment, "center")
             self.assertIn("top=18", table.border_sizes)
             self.assertIn("bottom=18", table.border_sizes)
+            self.assertEqual(table.horizontal_line_count, 3)
+            self.assertEqual(table.horizontal_line_positions, ("top", "after row 1", "bottom"))
             self.assertEqual(table.header_bottom_border_sizes, (6,))
 
     def test_read_docx_rejects_missing_or_wrong_extension(self) -> None:

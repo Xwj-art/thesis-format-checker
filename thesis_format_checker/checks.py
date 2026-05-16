@@ -14,6 +14,9 @@ _TEMPLATE_TABLE_WIDTH_VALUE = 5000
 _TEMPLATE_TABLE_ALIGNMENT = "center"
 _TEMPLATE_TABLE_OUTER_BORDER_SIZE = 18
 _TEMPLATE_TABLE_HEADER_BOTTOM_BORDER_SIZE = 6
+_TEMPLATE_TABLE_HORIZONTAL_LINE_COUNT = 3
+_TEMPLATE_HEADER_LINE_SIZE = 6
+_TEMPLATE_HEADER_LINE_SPACE = 1
 _PUNCTUATION_SUFFIX = "：:。.;；、,，!！?？"
 _HEADING_CHAPTER_RE = re.compile(r"^第\s*\d+\s*章(?:\s+.+)?$")
 _HEADING_LEVEL1_RE = re.compile(r"^\d+\.\d+(?:\s+.+)?$")
@@ -267,9 +270,9 @@ def _font_matches(font: str | None, expected: str) -> bool:
     normalized = font.lower().replace(" ", "")
     expected_normalized = expected.lower().replace(" ", "")
     if expected == "宋体":
-        return "宋体" in font
+        return "宋体" in font or normalized in {"simsun", "simsun-extb", "nsimsun"}
     if expected == "黑体":
-        return "黑体" in font
+        return "黑体" in font or normalized in {"simhei"}
     if expected == "Times New Roman":
         return normalized in {"timesnewroman", "timenewroman"}
     return normalized == expected_normalized
@@ -534,6 +537,55 @@ def _check_static_headers_and_page_numbers(document: DocumentInfo, rules: RuleSe
                     location=f"paragraph {first_body}",
                     expected=rules.expected_header_text,
                     actual="not explicit in section metadata",
+                )
+            )
+        header_positions = set(body_section.header_border_positions)
+        if "bottom" not in header_positions:
+            issues.append(
+                _issue(
+                    "HEADER_LINE_POSITION",
+                    Severity.WARNING,
+                    "Body page header should use a bottom paragraph border line.",
+                    location=f"section {body_section.index}",
+                    expected="bottom border in header paragraph",
+                    actual=", ".join(body_section.header_border_positions) or "not detected",
+                )
+            )
+        elif any(position != "bottom" for position in header_positions):
+            issues.append(
+                _issue(
+                    "HEADER_LINE_POSITION",
+                    Severity.WARNING,
+                    "Body page header line position does not match the empty template.",
+                    location=f"section {body_section.index}",
+                    expected="bottom border only",
+                    actual=", ".join(body_section.header_border_positions),
+                )
+            )
+        if body_section.header_bottom_border_sizes and any(
+            size != _TEMPLATE_HEADER_LINE_SIZE for size in body_section.header_bottom_border_sizes
+        ):
+            issues.append(
+                _issue(
+                    "HEADER_LINE_WIDTH",
+                    Severity.WARNING,
+                    "Body page header line width does not match the empty template.",
+                    location=f"section {body_section.index}",
+                    expected=f"{_TEMPLATE_HEADER_LINE_SIZE} eighths of a point (0.75 pt)",
+                    actual=", ".join(_format_border_size(size) for size in body_section.header_bottom_border_sizes),
+                )
+            )
+        if body_section.header_bottom_border_spaces and any(
+            space != _TEMPLATE_HEADER_LINE_SPACE for space in body_section.header_bottom_border_spaces
+        ):
+            issues.append(
+                _issue(
+                    "HEADER_LINE_POSITION",
+                    Severity.WARNING,
+                    "Body page header line spacing from text does not match the empty template.",
+                    location=f"section {body_section.index}",
+                    expected=f"space={_TEMPLATE_HEADER_LINE_SPACE}",
+                    actual=", ".join(f"space={space}" for space in body_section.header_bottom_border_spaces),
                 )
             )
 
@@ -951,11 +1003,23 @@ def _check_table_borders(document: DocumentInfo) -> list[Issue]:
 
 def _check_table_template_layout(table: TableInfo) -> list[Issue]:
     issues: list[Issue] = []
+    if table.horizontal_line_count is not None and table.horizontal_line_count != _TEMPLATE_TABLE_HORIZONTAL_LINE_COUNT:
+        issues.append(
+            _issue(
+                "TABLE_LINE_COUNT",
+                Severity.WARNING,
+                "Table should have exactly three visible horizontal lines.",
+                location=f"table {table.index}",
+                expected=f"{_TEMPLATE_TABLE_HORIZONTAL_LINE_COUNT} horizontal lines",
+                actual=f"{table.horizontal_line_count} horizontal lines",
+                evidence=", ".join(table.horizontal_line_positions),
+            )
+        )
     if table.width_type != _TEMPLATE_TABLE_WIDTH_TYPE or table.width_value != _TEMPLATE_TABLE_WIDTH_VALUE:
         issues.append(
             _issue(
                 "TABLE_WIDTH",
-                Severity.WARNING,
+                Severity.INFO,
                 "Table width does not match the empty template.",
                 location=f"table {table.index}",
                 expected="100% page text width (w:tblW type=pct w=5000)",
@@ -1798,6 +1862,8 @@ def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
             "HEADER_TEXT",
             "STATIC_BODY_HEADER",
             "STATIC_PAGE_FIELD",
+            "HEADER_LINE_POSITION",
+            "HEADER_LINE_WIDTH",
             "MAJOR_HEADING_SPACING",
             "ABSTRACT_FORMAT",
             "HEADING_PUNCTUATION",
@@ -1813,6 +1879,7 @@ def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
             "TOC_FIELD",
             "TABLE_BORDER",
             "TABLE_THREE_LINE",
+            "TABLE_LINE_COUNT",
             "TABLE_BORDER_WIDTH",
             "TABLE_HEADER_BORDER",
             "TABLE_WIDTH",
