@@ -36,6 +36,33 @@
     "line_space": 1
   },
   "structure": {
+    "headings": {
+      "abstract_cn": ["摘  要", "摘要"],
+      "abstract_en": ["Abstract"],
+      "toc": ["目　　录", "目录"],
+      "reference": ["参考文献"],
+      "thanks": ["致  谢", "致谢"],
+      "line_spacing_start": ["学位论文原创性声明", "摘  要", "摘要"],
+      "line_spacing_excluded": [
+        "学位论文原创性声明",
+        "学位论文版权使用授权书",
+        "摘  要",
+        "摘要",
+        "Abstract",
+        "目　　录",
+        "目录",
+        "参考文献",
+        "致  谢",
+        "致谢"
+      ],
+      "terminal": ["致  谢", "致谢", "附录", "附录A", "附录B"]
+    },
+    "patterns": {
+      "body_start": "^第\\s*1\\s*章\\b",
+      "heading_level_1": "^第\\s*\\d+\\s*章(?:\\s+.+)?$",
+      "heading_level_2": "^\\d+\\.\\d+(?:\\s+.+)?$",
+      "heading_level_3": "^\\d+\\.\\d+\\.\\d+(?:\\s+.+)?$"
+    },
     "required": {
       "STRUCTURE_ABSTRACT_CN": [
         "摘  要",

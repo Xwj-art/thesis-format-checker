@@ -53,6 +53,31 @@ def _numbering_pattern(rules: RuleSet | None, key: str) -> re.Pattern[str]:
     return re.compile(str(_cfg(rules, "numbering", key)))
 
 
+def _compact_text(text: str) -> str:
+    return re.sub(r"[\s\u3000]+", "", text.strip())
+
+
+def _structure_texts(rules: RuleSet | None, key: str) -> tuple[str, ...]:
+    value = _cfg(rules, "structure", "headings", key)
+    if isinstance(value, str):
+        return (value,)
+    return tuple(str(item) for item in value)
+
+
+def _structure_pattern(rules: RuleSet | None, key: str) -> re.Pattern[str]:
+    return re.compile(str(_cfg(rules, "structure", "patterns", key)))
+
+
+def _matches_configured_text(text: str, candidates: tuple[str, ...]) -> bool:
+    stripped = text.strip()
+    compact = _compact_text(stripped)
+    return any(stripped == candidate or compact == _compact_text(candidate) for candidate in candidates)
+
+
+def _is_configured_heading(text: str, rules: RuleSet | None, key: str) -> bool:
+    return _matches_configured_text(text, _structure_texts(rules, key))
+
+
 def _issue(
     code: str,
     severity: Severity,
@@ -86,45 +111,61 @@ def _is_toc_paragraph(paragraph: ParagraphInfo) -> bool:
     return bool("\t" in paragraph.text and re.search(r"\d+\s*$", text))
 
 
-def _is_reference_heading(text: str) -> bool:
-    return text.replace(" ", "") == "参考文献"
+def _is_toc_heading(text: str, rules: RuleSet | None = None) -> bool:
+    return _is_configured_heading(text, rules, "toc")
 
 
-def _is_thanks_heading(text: str) -> bool:
-    return text.replace(" ", "") == "致谢"
+def _is_reference_heading(text: str, rules: RuleSet | None = None) -> bool:
+    return _is_configured_heading(text, rules, "reference")
 
 
-def _first_body_paragraph_index(document: DocumentInfo) -> int:
+def _is_thanks_heading(text: str, rules: RuleSet | None = None) -> bool:
+    return _is_configured_heading(text, rules, "thanks")
+
+
+def _is_cn_abstract_heading(text: str, rules: RuleSet | None = None) -> bool:
+    return _is_configured_heading(text, rules, "abstract_cn")
+
+
+def _is_en_abstract_heading(text: str, rules: RuleSet | None = None) -> bool:
+    return _is_configured_heading(text, rules, "abstract_en")
+
+
+def _is_terminal_heading(text: str, rules: RuleSet | None = None) -> bool:
+    return _matches_configured_text(text, _structure_texts(rules, "terminal"))
+
+
+def _first_body_paragraph_index(document: DocumentInfo, rules: RuleSet | None = None) -> int:
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
-        if re.match(r"^第\s*1\s*章\b", text):
+        if _structure_pattern(rules, "body_start").match(text):
             return paragraph.index
     return 0
 
 
-def _reference_heading_index(document: DocumentInfo) -> int | None:
+def _reference_heading_index(document: DocumentInfo, rules: RuleSet | None = None) -> int | None:
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
         if _is_toc_paragraph(paragraph):
             continue
-        if _is_reference_heading(text):
+        if _is_reference_heading(text, rules):
             return paragraph.index
     return None
 
 
-def _thanks_heading_index(document: DocumentInfo) -> int | None:
+def _thanks_heading_index(document: DocumentInfo, rules: RuleSet | None = None) -> int | None:
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
         if _is_toc_paragraph(paragraph):
             continue
-        if _is_thanks_heading(text):
+        if _is_thanks_heading(text, rules):
             return paragraph.index
     return None
 
 
-def _in_body_range(paragraph: ParagraphInfo, document: DocumentInfo) -> bool:
-    first_body = _first_body_paragraph_index(document)
-    reference_start = _reference_heading_index(document)
+def _in_body_range(paragraph: ParagraphInfo, document: DocumentInfo, rules: RuleSet | None = None) -> bool:
+    first_body = _first_body_paragraph_index(document, rules)
+    reference_start = _reference_heading_index(document, rules)
     if paragraph.index < first_body:
         return False
     if reference_start is not None and paragraph.index >= reference_start:
@@ -151,12 +192,12 @@ def _previous_content_paragraph(document: DocumentInfo, index: int) -> Paragraph
     return previous
 
 
-def _is_heading_text(text: str) -> bool:
+def _is_heading_text(text: str, rules: RuleSet | None = None) -> bool:
     stripped = text.strip()
     return bool(
-        _HEADING_CHAPTER_RE.match(stripped)
-        or _HEADING_LEVEL1_RE.match(stripped)
-        or _HEADING_LEVEL2_RE.match(stripped)
+        _structure_pattern(rules, "heading_level_1").match(stripped)
+        or _structure_pattern(rules, "heading_level_2").match(stripped)
+        or _structure_pattern(rules, "heading_level_3").match(stripped)
     )
 
 
@@ -175,19 +216,19 @@ def _style_heading_level(paragraph: ParagraphInfo) -> int | None:
     return None
 
 
-def _heading_level(paragraph: ParagraphInfo) -> int | None:
+def _heading_level(paragraph: ParagraphInfo, rules: RuleSet | None = None) -> int | None:
     text = paragraph.text.strip()
-    if _HEADING_CHAPTER_RE.match(text):
+    if _structure_pattern(rules, "heading_level_1").match(text):
         return 1
-    if _HEADING_LEVEL2_RE.match(text):
+    if _structure_pattern(rules, "heading_level_3").match(text):
         return 3
-    if _HEADING_LEVEL1_RE.match(text):
+    if _structure_pattern(rules, "heading_level_2").match(text):
         return 2
     return _style_heading_level(paragraph)
 
 
-def _is_heading_paragraph(paragraph: ParagraphInfo) -> bool:
-    return _heading_level(paragraph) is not None
+def _is_heading_paragraph(paragraph: ParagraphInfo, rules: RuleSet | None = None) -> bool:
+    return _heading_level(paragraph, rules) is not None
 
 
 def _is_caption_text(text: str, rules: RuleSet | None = None) -> bool:
@@ -205,9 +246,9 @@ def _looks_like_body_paragraph(paragraph: ParagraphInfo, rules: RuleSet | None =
         return False
     if _is_toc_paragraph(paragraph):
         return False
-    if _is_heading_paragraph(paragraph):
+    if _is_heading_paragraph(paragraph, rules):
         return False
-    if text == "参考文献" or text.startswith("参考文献"):
+    if _is_reference_heading(text, rules):
         return False
     if _keyword_line_parts(text, rules) is not None:
         return False
@@ -218,14 +259,11 @@ def _looks_like_body_paragraph(paragraph: ParagraphInfo, rules: RuleSet | None =
     return True
 
 
-def _line_spacing_check_start_index(document: DocumentInfo) -> int:
+def _line_spacing_check_start_index(document: DocumentInfo, rules: RuleSet | None = None) -> int:
     for paragraph in document.paragraphs:
-        if paragraph.text.strip().replace(" ", "") == "学位论文原创性声明":
+        if _matches_configured_text(paragraph.text, _structure_texts(rules, "line_spacing_start")):
             return paragraph.index
-    for paragraph in document.paragraphs:
-        if paragraph.text.strip().replace(" ", "") == "摘要":
-            return paragraph.index
-    return _first_body_paragraph_index(document)
+    return _first_body_paragraph_index(document, rules)
 
 
 def _looks_like_line_spacing_target(
@@ -234,23 +272,13 @@ def _looks_like_line_spacing_target(
     text = paragraph.text.strip()
     if not text:
         return False
-    if paragraph.index < _line_spacing_check_start_index(document):
+    if paragraph.index < _line_spacing_check_start_index(document, rules):
         return False
     if _is_toc_paragraph(paragraph):
         return False
-    normalized = text.replace(" ", "")
-    if normalized in {
-        "学位论文原创性声明",
-        "学位论文版权使用授权书",
-        "摘要",
-        "目录",
-        "参考文献",
-        "致谢",
-    }:
+    if _matches_configured_text(text, _structure_texts(rules, "line_spacing_excluded")):
         return False
-    if text == "Abstract":
-        return False
-    if _is_heading_paragraph(paragraph):
+    if _is_heading_paragraph(paragraph, rules):
         return False
     if _is_caption_text(text, rules):
         return False
@@ -261,7 +289,7 @@ def _looks_like_table_line_spacing_target(paragraph: ParagraphInfo, rules: RuleS
     text = paragraph.text.strip()
     if not text:
         return False
-    if _is_heading_paragraph(paragraph):
+    if _is_heading_paragraph(paragraph, rules):
         return False
     if _is_caption_text(text, rules):
         return False
@@ -378,7 +406,7 @@ def _check_heading_script_fonts(document: DocumentInfo, rules: RuleSet | None = 
         if _is_toc_paragraph(paragraph):
             continue
         text = paragraph.text.strip()
-        level = _heading_level(paragraph)
+        level = _heading_level(paragraph, rules)
         if not text or level is None:
             continue
         level_config = _cfg(rules, "heading", "levels", str(level))
@@ -562,7 +590,7 @@ def _check_header_text(document: DocumentInfo, rules: RuleSet) -> list[Issue]:
 
 def _check_static_headers_and_page_numbers(document: DocumentInfo, rules: RuleSet) -> list[Issue]:
     issues: list[Issue] = []
-    first_body = _first_body_paragraph_index(document)
+    first_body = _first_body_paragraph_index(document, rules)
     body_section = None
     if rules.expected_header_text:
         for section in document.sections:
@@ -711,7 +739,7 @@ def _check_headings(document: DocumentInfo, rules: RuleSet | None = None) -> lis
         if _is_toc_paragraph(paragraph):
             continue
         text = paragraph.text.strip()
-        level = _heading_level(paragraph)
+        level = _heading_level(paragraph, rules)
         if not text or level is None:
             continue
         level_config = _cfg(rules, "heading", "levels", str(level))
@@ -1049,17 +1077,22 @@ def _check_keywords(document: DocumentInfo, rules: RuleSet | None = None) -> lis
 def _check_structure_presence(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     texts = [paragraph.text.strip() for paragraph in document.paragraphs if not _is_toc_paragraph(paragraph)]
-    normalized = [text.replace(" ", "") for text in texts]
     required = _cfg(rules, "structure", "required")
     for code, (needle, message) in required.items():
         if code == "STRUCTURE_TOC":
-            found = any("目录" in text.replace(" ", "") for text in texts)
+            found = any(_is_toc_heading(text, rules) for text in texts)
         elif code == "STRUCTURE_ABSTRACT_EN":
-            found = any(text == "Abstract" for text in texts)
+            found = any(_is_en_abstract_heading(text, rules) for text in texts)
+        elif code == "STRUCTURE_ABSTRACT_CN":
+            found = any(_is_cn_abstract_heading(text, rules) for text in texts)
         elif code == "STRUCTURE_BODY_START":
-            found = any(text.startswith("第1章") for text in texts)
+            found = any(_structure_pattern(rules, "body_start").match(text) for text in texts)
+        elif code == "STRUCTURE_REFERENCES":
+            found = any(_is_reference_heading(text, rules) for text in texts)
+        elif code == "STRUCTURE_THANKS":
+            found = any(_is_thanks_heading(text, rules) for text in texts)
         else:
-            found = needle.replace(" ", "") in normalized
+            found = any(_matches_configured_text(text, (str(needle),)) for text in texts)
         if not found:
             issues.append(_issue(code, Severity.WARNING, message, expected=needle))
     return issues
@@ -1104,7 +1137,7 @@ def _check_abstract_format(document: DocumentInfo, rules: RuleSet | None = None)
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
         normalized = text.replace(" ", "")
-        if normalized == "摘要":
+        if _is_cn_abstract_heading(text, rules):
             if paragraph.alignment is not None and paragraph.alignment != expected_alignment:
                 issues.append(
                     _issue(
@@ -1126,7 +1159,7 @@ def _check_abstract_format(document: DocumentInfo, rules: RuleSet | None = None)
                     rules=rules,
                 )
             )
-        elif text == "Abstract":
+        elif _is_en_abstract_heading(text, rules):
             if paragraph.alignment is not None and paragraph.alignment != expected_alignment:
                 issues.append(
                     _issue(
@@ -1152,7 +1185,7 @@ def _check_abstract_format(document: DocumentInfo, rules: RuleSet | None = None)
     return issues
 
 
-def _check_references(document: DocumentInfo) -> list[Issue]:
+def _check_references(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     reference_started = False
 
@@ -1164,12 +1197,11 @@ def _check_references(document: DocumentInfo) -> list[Issue]:
             continue
 
         if not reference_started:
-            if _is_reference_heading(text):
+            if _is_reference_heading(text, rules):
                 reference_started = True
             continue
 
-        normalized = text.replace(" ", "")
-        if _is_heading_text(text) or normalized in {"致谢", "附录", "附录A", "附录B"}:
+        if _is_heading_text(text, rules) or _is_terminal_heading(text, rules):
             break
 
         if not (_REFERENCE_ENTRY_RE.match(text) or _REFERENCE_TYPE_RE.search(text)):
@@ -1185,8 +1217,8 @@ def _check_references(document: DocumentInfo) -> list[Issue]:
     return issues
 
 
-def _check_toc_fields(document: DocumentInfo) -> list[Issue]:
-    has_toc_heading = any("目录" in paragraph.text.replace(" ", "") for paragraph in document.paragraphs)
+def _check_toc_fields(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
+    has_toc_heading = any(_is_toc_heading(paragraph.text, rules) for paragraph in document.paragraphs)
     if not has_toc_heading:
         return []
     has_toc_field = any(
@@ -1207,7 +1239,7 @@ def _check_toc_fields(document: DocumentInfo) -> list[Issue]:
     ]
 
 
-def _reference_entry_numbers(document: DocumentInfo) -> set[int]:
+def _reference_entry_numbers(document: DocumentInfo, rules: RuleSet | None = None) -> set[int]:
     numbers: set[int] = set()
     reference_started = False
     for paragraph in document.paragraphs:
@@ -1216,10 +1248,10 @@ def _reference_entry_numbers(document: DocumentInfo) -> set[int]:
             continue
         normalized = text.replace(" ", "")
         if not reference_started:
-            if _is_reference_heading(text):
+            if _is_reference_heading(text, rules):
                 reference_started = True
             continue
-        if _is_heading_text(text) or normalized in {"致谢", "附录", "附录A", "附录B"}:
+        if _is_heading_text(text, rules) or _is_terminal_heading(text, rules):
             break
         match = _REFERENCE_ENTRY_RE.match(text)
         if match:
@@ -1278,12 +1310,12 @@ def _has_reference_field(paragraph: ParagraphInfo) -> bool:
 
 def _check_reference_citations(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
-    reference_numbers = _reference_entry_numbers(document)
+    reference_numbers = _reference_entry_numbers(document, rules)
     cited_numbers: set[int] = set()
-    reference_start = _reference_heading_index(document)
+    reference_start = _reference_heading_index(document, rules)
     expected_separator = str(_cfg(rules, "reference", "citation_separator"))
     for paragraph in document.paragraphs:
-        if not _in_body_range(paragraph, document):
+        if not _in_body_range(paragraph, document, rules):
             continue
         if reference_start is not None and paragraph.index >= reference_start:
             continue
@@ -1291,7 +1323,7 @@ def _check_reference_citations(document: DocumentInfo, rules: RuleSet | None = N
             continue
         raw_text = paragraph.text
         text = raw_text.strip()
-        if not text or _is_heading_paragraph(paragraph) or _is_caption_text(text, rules):
+        if not text or _is_heading_paragraph(paragraph, rules) or _is_caption_text(text, rules):
             continue
         for match in _REFERENCE_CITATION_RE.finditer(raw_text):
             citation_text = match.group(0)
@@ -1363,8 +1395,8 @@ def _check_reference_citations(document: DocumentInfo, rules: RuleSet | None = N
 
 def _check_table_borders(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
-    first_body = _first_body_paragraph_index(document)
-    reference_start = _reference_heading_index(document)
+    first_body = _first_body_paragraph_index(document, rules)
+    reference_start = _reference_heading_index(document, rules)
     for table in document.tables:
         if not _looks_like_data_table(table):
             continue
@@ -1762,7 +1794,7 @@ def _check_caption_object_order(document: DocumentInfo, rules: RuleSet | None = 
     tables_by_block = [table for table in document.tables if table.block_index is not None]
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
-        if not _in_body_range(paragraph, document):
+        if not _in_body_range(paragraph, document, rules):
             continue
         if _numbering_pattern(rules, "figure_caption_pattern").match(text):
             previous = _previous_content_paragraph(document, paragraph.index)
@@ -1915,8 +1947,8 @@ def _check_table_cell_typography(document: DocumentInfo, rules: RuleSet | None =
     expected_cell_size = _float_cfg(rules, "table", "cell_size_pt")
     expected_cell_ascii = str(_cfg(rules, "table", "cell_ascii"))
     expected_cell_east_asia = str(_cfg(rules, "table", "cell_east_asia"))
-    first_body = _first_body_paragraph_index(document)
-    reference_start = _reference_heading_index(document)
+    first_body = _first_body_paragraph_index(document, rules)
+    reference_start = _reference_heading_index(document, rules)
     reference_block = document.paragraphs[reference_start].block_index if reference_start is not None else None
     for table in document.tables:
         if table.block_index is None:
@@ -2033,11 +2065,11 @@ def _check_table_cell_spacing(
     return issues
 
 
-def _check_page_numbering_static(document: DocumentInfo) -> list[Issue]:
+def _check_page_numbering_static(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     if not document.sections:
         return issues
-    first_body = _first_body_paragraph_index(document)
+    first_body = _first_body_paragraph_index(document, rules)
     body_section = None
     for section in document.sections:
         if section.page_number_start is not None:
@@ -2083,7 +2115,7 @@ def _check_reference_typography(document: DocumentInfo, rules: RuleSet | None = 
             continue
         normalized = text.replace(" ", "")
         if not reference_started:
-            if _is_reference_heading(text):
+            if _is_reference_heading(text, rules):
                 reference_started = True
                 if paragraph.alignment is not None and paragraph.alignment != heading_alignment:
                     issues.append(
@@ -2108,7 +2140,7 @@ def _check_reference_typography(document: DocumentInfo, rules: RuleSet | None = 
                 )
             continue
 
-        if _is_heading_text(text) or normalized in {"致谢", "附录", "附录A", "附录B"}:
+        if _is_heading_text(text, rules) or _is_terminal_heading(text, rules):
             break
         if paragraph.alignment is not None and paragraph.alignment not in list_alignment:
             issues.append(
@@ -2227,11 +2259,11 @@ def _check_reference_typography(document: DocumentInfo, rules: RuleSet | None = 
     return issues
 
 
-def _check_empty_paragraphs(document: DocumentInfo) -> list[Issue]:
+def _check_empty_paragraphs(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     run_start: ParagraphInfo | None = None
     run_length = 0
-    first_body_index = _first_body_paragraph_index(document)
+    first_body_index = _first_body_paragraph_index(document, rules)
 
     for paragraph in document.paragraphs:
         if paragraph.index < first_body_index:
@@ -2379,37 +2411,37 @@ def _mixed_language_spacing_evidence(text: str) -> str:
     return text[start:end]
 
 
-def _mixed_language_check_start_index(document: DocumentInfo) -> int:
+def _mixed_language_check_start_index(document: DocumentInfo, rules: RuleSet | None = None) -> int:
     for paragraph in document.paragraphs:
-        if paragraph.text.strip().replace(" ", "") == "摘要":
+        if _is_cn_abstract_heading(paragraph.text, rules):
             return paragraph.index
-    return _first_body_paragraph_index(document)
+    return _first_body_paragraph_index(document, rules)
 
 
 def _check_mixed_language_spacing(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
-    reference_start = _reference_heading_index(document)
-    thanks_start = _thanks_heading_index(document)
+    reference_start = _reference_heading_index(document, rules)
+    thanks_start = _thanks_heading_index(document, rules)
     stop_index = reference_start if reference_start is not None else thanks_start
     seen: set[int] = set()
     for paragraph in document.paragraphs:
         if paragraph.index in seen:
             continue
         seen.add(paragraph.index)
-        if paragraph.index < _mixed_language_check_start_index(document):
+        if paragraph.index < _mixed_language_check_start_index(document, rules):
             continue
         if stop_index is not None and paragraph.index >= stop_index:
             continue
         if _is_toc_paragraph(paragraph):
             continue
         text = paragraph.text.strip()
-        if not text or text == "Abstract":
+        if not text or _is_en_abstract_heading(text, rules):
             continue
         if "签名" in text:
             continue
         if _keyword_line_parts(text, rules) is not None:
             continue
-        if _is_heading_paragraph(paragraph) or _is_caption_text(text, rules):
+        if _is_heading_paragraph(paragraph, rules) or _is_caption_text(text, rules):
             continue
         if re.search(r"https?://|www\.|[A-Za-z]:[/\\]", text):
             continue
@@ -2430,7 +2462,7 @@ def _check_mixed_language_spacing(document: DocumentInfo, rules: RuleSet | None 
 
 def _check_thanks_format(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
-    thanks_index = _thanks_heading_index(document)
+    thanks_index = _thanks_heading_index(document, rules)
     if thanks_index is None:
         return issues
     heading_alignment = str(_cfg(rules, "thanks", "heading_alignment"))
@@ -2464,7 +2496,7 @@ def _check_thanks_format(document: DocumentInfo, rules: RuleSet | None = None) -
                 )
             )
             continue
-        if _is_heading_text(text):
+        if _is_heading_text(text, rules):
             break
         if paragraph.first_line_indent_chars is not None:
             if abs(paragraph.first_line_indent_chars - body_indent) > _float_cfg(rules, "tolerances", "indent_chars"):
@@ -2571,16 +2603,16 @@ def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
     for paragraph in document.paragraphs:
         issues.extend(_check_numbering(paragraph, rules))
     issues.extend(_check_keywords(document, rules))
-    issues.extend(_check_references(document))
+    issues.extend(_check_references(document, rules))
     issues.extend(_check_reference_citations(document, rules))
-    issues.extend(_check_toc_fields(document))
+    issues.extend(_check_toc_fields(document, rules))
     issues.extend(_check_table_borders(document, rules))
     issues.extend(_check_captions(document, rules))
     issues.extend(_check_caption_object_order(document, rules))
     issues.extend(_check_continued_table_layout(document, rules))
-    issues.extend(_check_page_numbering_static(document))
+    issues.extend(_check_page_numbering_static(document, rules))
     issues.extend(_check_reference_typography(document, rules))
-    issues.extend(_check_empty_paragraphs(document))
+    issues.extend(_check_empty_paragraphs(document, rules))
     issues.extend(_check_body_typography(document, rules))
     issues.extend(_check_mixed_language_spacing(document, rules))
     issues.extend(_check_table_cell_typography(document, rules))

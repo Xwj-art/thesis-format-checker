@@ -18,6 +18,7 @@ from thesis_format_checker.checks import (
     _check_numbering,
     _check_reference_citations,
     _check_reference_typography,
+    _check_structure_presence,
     _check_static_headers_and_page_numbers,
     _check_table_borders,
     _check_table_cell_typography,
@@ -413,6 +414,72 @@ class ChecksTests(unittest.TestCase):
         self.assertTrue(
             any(issue.code == "REFERENCE_CITATION_TARGET" and issue.severity is Severity.INFO for issue in issues)
         )
+
+    def test_custom_markdown_structure_controls_reference_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                r"""# Requirements
+
+```json thesis-format-rules
+{
+  "structure": {
+    "headings": {
+      "abstract_cn": ["中文概要"],
+      "abstract_en": ["Summary"],
+      "toc": ["Contents"],
+      "reference": ["Works Cited"],
+      "thanks": ["Acknowledgments"],
+      "terminal": ["Acknowledgments", "Appendix"]
+    },
+    "patterns": {
+      "body_start": "^Chapter\\s+1\\b",
+      "heading_level_1": "^Chapter\\s+\\d+(?:\\s+.+)?$"
+    },
+    "required": {
+      "STRUCTURE_ABSTRACT_CN": ["中文概要", "Chinese abstract heading was not detected."],
+      "STRUCTURE_ABSTRACT_EN": ["Summary", "English abstract heading was not detected."],
+      "STRUCTURE_TOC": ["Contents", "Table of contents heading was not detected."],
+      "STRUCTURE_BODY_START": ["Chapter 1", "Chapter 1 heading was not detected."],
+      "STRUCTURE_REFERENCES": ["Works Cited", "References heading was not detected."],
+      "STRUCTURE_THANKS": ["Acknowledgments", "Acknowledgements heading was not detected."]
+    }
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            paragraph = ParagraphInfo(
+                index=5,
+                text="Prior work is discussed in [1].",
+                field_instructions=("REF _Ref123456 \\r \\h",),
+                runs=(
+                    RunInfo(text="Prior work is discussed in "),
+                    RunInfo(text="[1]", vertical_align="superscript"),
+                    RunInfo(text="."),
+                ),
+            )
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    ParagraphInfo(index=0, text="中文概要"),
+                    ParagraphInfo(index=1, text="Summary"),
+                    ParagraphInfo(index=2, text="Contents"),
+                    ParagraphInfo(index=3, text="Chapter 1 Introduction"),
+                    paragraph,
+                    ParagraphInfo(index=6, text="Works Cited"),
+                    ParagraphInfo(index=7, text="[1] Author. Title[J]. Journal, 2024."),
+                    ParagraphInfo(index=8, text="Acknowledgments"),
+                ),
+            )
+
+            structure_issues = _check_structure_presence(document, rules)
+            citation_issues = _check_reference_citations(document, rules)
+
+            self.assertEqual(structure_issues, [])
+            self.assertFalse(any(issue.code == "REFERENCE_CITATION_TARGET" for issue in citation_issues))
 
     def test_reference_typography_checks_list_spacing_and_font(self) -> None:
         entry = ParagraphInfo(
