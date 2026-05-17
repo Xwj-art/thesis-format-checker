@@ -3,46 +3,54 @@ from __future__ import annotations
 import re
 
 from .model import CheckResult, DocumentInfo, Issue, ParagraphInfo, RuleSet, Severity, TableInfo
+from .rules import default_rules
 
 
-_PAGE_TOLERANCE_CM = 0.1
-_LINE_SPACING_TOLERANCE_PT = 0.5
-_FONT_SIZE_TOLERANCE_PT = 0.25
-_INDENT_TOLERANCE_CHARS = 0.25
-_TEMPLATE_TABLE_WIDTH_TYPE = "pct"
-_TEMPLATE_TABLE_WIDTH_VALUE = 5000
-_TEMPLATE_TABLE_ALIGNMENT = "center"
-_TEMPLATE_TABLE_OUTER_BORDER_SIZE = 18
-_TEMPLATE_TABLE_HEADER_BOTTOM_BORDER_SIZE = 6
-_TEMPLATE_TABLE_HORIZONTAL_LINE_COUNT = 3
-_TEMPLATE_HEADER_LINE_SIZE = 6
-_TEMPLATE_HEADER_LINE_SPACE = 1
-_PUNCTUATION_SUFFIX = "：:。.;；、,，!！?？"
 _HEADING_CHAPTER_RE = re.compile(r"^第\s*\d+\s*章(?:\s+.+)?$")
 _HEADING_LEVEL1_RE = re.compile(r"^\d+\.\d+(?:\s+.+)?$")
 _HEADING_LEVEL2_RE = re.compile(r"^\d+\.\d+\.\d+(?:\s+.+)?$")
-_FIGURE_DOT_RE = re.compile(r"图\s*\d+\.\d+")
-_TABLE_DOT_RE = re.compile(r"表\s*\d+\.\d+")
-_EQUATION_DOT_RE = re.compile(r"[（(]\s*[1-9]\d{0,1}\.\d{1,2}\s*[）)]")
-_FIGURE_CAPTION_RE = re.compile(r"^图\s*\d+-\d+(?:\s+|$)")
-_TABLE_CAPTION_RE = re.compile(r"^表\s*\d+-\d+(?:\s+|$)")
-_CONTINUED_TABLE_CAPTION_RE = re.compile(r"^续表\s*\d+-\d+(?:\s+|$)")
-_CAPTION_RE = re.compile(r"^(图|表|续表)\s*(\d+-\d+)(\s+)(.+)$")
-_CAPTION_PREFIX_RE = re.compile(r"^(?:图|表|续表)\s*\d+-\d+(?:\s+|$)")
-_MAJOR_HEADING_EXPECTED = {
-    "摘要": "摘  要",
-    "目录": "目　　录",
-    "参考文献": "参考文献",
-    "致谢": "致  谢",
-}
 _REFERENCE_ENTRY_RE = re.compile(r"^\[(\d+)\]")
 _REFERENCE_TYPE_RE = re.compile(r"\[(?:M|J|D|C|R|P|EB/OL|OL|N|S|Z)(?:/[A-Z]+)?\]")
-_KEYWORD_LINE_RE = re.compile(r"^(关键词|Key Words)\s*[：:]\s*(.+)$", re.IGNORECASE)
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9]")
 _CJK_ASCII_ADJACENT_RE = re.compile(
     r"[\u3400-\u4dbf\u4e00-\u9fff][A-Za-z]|[A-Za-z][\u3400-\u4dbf\u4e00-\u9fff]"
 )
+_CJK_ASCII_SPACED_RE = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff][ \t\u3000]+[A-Za-z0-9]|[A-Za-z0-9][ \t\u3000]+[\u3400-\u4dbf\u4e00-\u9fff]"
+)
+_REFERENCE_CITATION_RE = re.compile(r"\[(\d+(?:\s*[-,，]\s*\d+)*)\]")
+
+
+def _active_rules(rules: RuleSet | None = None) -> RuleSet:
+    if rules is not None and rules.config:
+        return rules
+    return default_rules()
+
+
+def _cfg(rules: RuleSet | None, *path: str):
+    current = _active_rules(rules).config
+    for item in path:
+        current = current[item]
+    return current
+
+
+def _float_cfg(rules: RuleSet | None, *path: str) -> float:
+    return float(_cfg(rules, *path))
+
+
+def _int_cfg(rules: RuleSet | None, *path: str) -> int:
+    return int(_cfg(rules, *path))
+
+
+def _alignment_allowed(expected) -> set[str]:
+    if isinstance(expected, str):
+        return {expected}
+    return {str(item) for item in expected}
+
+
+def _numbering_pattern(rules: RuleSet | None, key: str) -> re.Pattern[str]:
+    return re.compile(str(_cfg(rules, "numbering", key)))
 
 
 def _issue(
@@ -182,16 +190,16 @@ def _is_heading_paragraph(paragraph: ParagraphInfo) -> bool:
     return _heading_level(paragraph) is not None
 
 
-def _is_caption_text(text: str) -> bool:
-    return bool(_CAPTION_PREFIX_RE.match(text.strip()))
+def _is_caption_text(text: str, rules: RuleSet | None = None) -> bool:
+    return bool(_numbering_pattern(rules, "caption_prefix_pattern").match(text.strip()))
 
 
-def _has_trailing_punctuation(text: str) -> bool:
+def _has_trailing_punctuation(text: str, rules: RuleSet | None = None) -> bool:
     stripped = text.strip()
-    return bool(stripped) and stripped[-1] in _PUNCTUATION_SUFFIX
+    return bool(stripped) and stripped[-1] in str(_cfg(rules, "heading", "punctuation_suffix"))
 
 
-def _looks_like_body_paragraph(paragraph: ParagraphInfo) -> bool:
+def _looks_like_body_paragraph(paragraph: ParagraphInfo, rules: RuleSet | None = None) -> bool:
     text = paragraph.text.strip()
     if not text:
         return False
@@ -201,11 +209,11 @@ def _looks_like_body_paragraph(paragraph: ParagraphInfo) -> bool:
         return False
     if text == "参考文献" or text.startswith("参考文献"):
         return False
-    if _KEYWORD_LINE_RE.match(text):
+    if _keyword_line_parts(text, rules) is not None:
         return False
     if _REFERENCE_ENTRY_RE.match(text):
         return False
-    if _is_caption_text(text):
+    if _is_caption_text(text, rules):
         return False
     return True
 
@@ -220,7 +228,9 @@ def _line_spacing_check_start_index(document: DocumentInfo) -> int:
     return _first_body_paragraph_index(document)
 
 
-def _looks_like_line_spacing_target(paragraph: ParagraphInfo, document: DocumentInfo) -> bool:
+def _looks_like_line_spacing_target(
+    paragraph: ParagraphInfo, document: DocumentInfo, rules: RuleSet | None = None
+) -> bool:
     text = paragraph.text.strip()
     if not text:
         return False
@@ -242,18 +252,18 @@ def _looks_like_line_spacing_target(paragraph: ParagraphInfo, document: Document
         return False
     if _is_heading_paragraph(paragraph):
         return False
-    if _is_caption_text(text):
+    if _is_caption_text(text, rules):
         return False
     return True
 
 
-def _looks_like_table_line_spacing_target(paragraph: ParagraphInfo) -> bool:
+def _looks_like_table_line_spacing_target(paragraph: ParagraphInfo, rules: RuleSet | None = None) -> bool:
     text = paragraph.text.strip()
     if not text:
         return False
     if _is_heading_paragraph(paragraph):
         return False
-    if _is_caption_text(text):
+    if _is_caption_text(text, rules):
         return False
     return True
 
@@ -299,11 +309,13 @@ def _check_explicit_run_format(
     expected_east_asia: str | None = None,
     expected_ascii: str | None = None,
     require_bold: bool | None = None,
+    rules: RuleSet | None = None,
 ) -> list[Issue]:
     issues: list[Issue] = []
+    font_size_tolerance = _float_cfg(rules, "tolerances", "font_size_pt")
     for run in _visible_runs(paragraph):
         if expected_size_pt is not None and run.size_pt is not None:
-            if abs(run.size_pt - expected_size_pt) > _FONT_SIZE_TOLERANCE_PT:
+            if abs(run.size_pt - expected_size_pt) > font_size_tolerance:
                 issues.append(
                     _issue(
                         code,
@@ -360,50 +372,125 @@ def _check_explicit_run_format(
     return issues
 
 
-def _check_heading_script_fonts(document: DocumentInfo) -> list[Issue]:
+def _check_heading_script_fonts(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     for paragraph in document.paragraphs:
         if _is_toc_paragraph(paragraph):
             continue
         text = paragraph.text.strip()
-        if not text or not _is_heading_paragraph(paragraph):
+        level = _heading_level(paragraph)
+        if not text or level is None:
             continue
+        level_config = _cfg(rules, "heading", "levels", str(level))
+        expected_east_asia = str(level_config["east_asia"])
+        expected_ascii = str(level_config["ascii"])
+        expected_bold = level_config.get("bold")
         for run in _visible_runs(paragraph):
             if _has_cjk(run.text) and run.font_east_asia is not None:
-                if not _font_matches(run.font_east_asia, "黑体"):
+                if not _font_matches(run.font_east_asia, expected_east_asia):
                     issues.append(
                         _issue(
                             "HEADING_SCRIPT_FONT",
                             Severity.WARNING,
-                            "Heading Chinese text should use Heiti.",
+                            "Heading Chinese text should match the configured font.",
                             location=_paragraph_location(paragraph),
-                            expected="中文=黑体",
+                            expected=f"中文={expected_east_asia}",
                             actual=_run_font_actual(run),
                             evidence=text,
                         )
                     )
                     break
             if _has_ascii_word(run.text) and run.font_ascii is not None:
-                if not (_font_matches(run.font_ascii, "Times New Roman") or _font_matches(run.font_ascii, "黑体")):
+                if not _font_matches(run.font_ascii, expected_ascii):
                     issues.append(
                         _issue(
                             "HEADING_SCRIPT_FONT",
                             Severity.WARNING,
-                            "Heading numbers and English text should not use body ASCII fonts.",
+                            "Heading numbers and English text should match the configured font.",
                             location=_paragraph_location(paragraph),
-                            expected="数字/英文=Times New Roman or heading Heiti style",
+                            expected=f"数字/英文={expected_ascii}",
                             actual=_run_font_actual(run),
                             evidence=text,
                         )
                     )
                     break
+            if expected_bold is True and run.bold is not True:
+                issues.append(
+                    _issue(
+                        "HEADING_SCRIPT_FONT",
+                        Severity.WARNING,
+                        "Chapter heading text should be bold like the empty template.",
+                        location=_paragraph_location(paragraph),
+                        expected="bold",
+                        actual="not bold" if run.bold is False else "not explicit",
+                        evidence=text,
+                    )
+                )
+                break
+            if expected_bold is False and run.bold is True:
+                issues.append(
+                    _issue(
+                        "HEADING_SCRIPT_FONT",
+                        Severity.WARNING,
+                        "Section heading text should not be bold in the empty template.",
+                        location=_paragraph_location(paragraph),
+                        expected="not bold",
+                        actual="bold",
+                        evidence=text,
+                    )
+                )
+                break
+            if run.italic is True:
+                issues.append(
+                    _issue(
+                        "HEADING_SCRIPT_FONT",
+                        Severity.WARNING,
+                        "Heading text should not be italic in the empty template.",
+                        location=_paragraph_location(paragraph),
+                        expected="not italic",
+                        actual="italic",
+                        evidence=text,
+                    )
+                )
+                break
     return issues
 
 
-def _split_keywords(keyword_text: str) -> tuple[list[str], bool, bool]:
+def _loose_keyword_label_pattern(label: str) -> str:
+    parts = re.split(r"([ \t\u3000]+)", label)
+    return "".join(r"[ \t\u3000]+" if part.strip() == "" else re.escape(part) for part in parts)
+
+
+def _keyword_line_parts(text: str, rules: RuleSet | None = None) -> dict[str, str] | None:
+    labels = (
+        str(_cfg(rules, "keywords", "cn_label")),
+        str(_cfg(rules, "keywords", "en_label")),
+    )
+    for expected_label in labels:
+        pattern = re.compile(
+            rf"^(?P<label>{_loose_keyword_label_pattern(expected_label)})"
+            r"(?P<space_before>[ \t\u3000]*)(?P<delimiter>[：:])"
+            r"(?P<space_after>[ \t\u3000]*)(?P<body>.+)$",
+            flags=re.IGNORECASE,
+        )
+        match = pattern.match(text)
+        if match:
+            return {
+                "expected_label": expected_label,
+                "label": match.group("label"),
+                "space_before": match.group("space_before"),
+                "delimiter": match.group("delimiter"),
+                "space_after": match.group("space_after"),
+                "body": match.group("body"),
+            }
+    return None
+
+
+def _split_keywords(keyword_text: str, rules: RuleSet | None = None) -> tuple[list[str], bool, bool]:
+    expected_separator = str(_cfg(rules, "keywords", "separator"))
     has_ascii_separator = ";" in keyword_text
     items = [part.strip() for part in re.split(r"[；;]", keyword_text) if part.strip()]
-    trailing_separator = keyword_text.rstrip().endswith(("；", ";"))
+    trailing_separator = keyword_text.rstrip().endswith((expected_separator, ";"))
     return items, has_ascii_separator, trailing_separator
 
 
@@ -436,7 +523,7 @@ def _check_page_settings(document: DocumentInfo, rules: RuleSet) -> list[Issue]:
             actual_value = actual.get(key)
             if actual_value is None:
                 continue
-            if abs(actual_value - expected_value) <= _PAGE_TOLERANCE_CM:
+            if abs(actual_value - expected_value) <= _float_cfg(rules, "tolerances", "page_cm"):
                 continue
             issues.append(
                 _issue(
@@ -562,8 +649,9 @@ def _check_static_headers_and_page_numbers(document: DocumentInfo, rules: RuleSe
                     actual=", ".join(body_section.header_border_positions),
                 )
             )
+        expected_header_line_size = _int_cfg(rules, "header", "line_size_eighths")
         if body_section.header_bottom_border_sizes and any(
-            size != _TEMPLATE_HEADER_LINE_SIZE for size in body_section.header_bottom_border_sizes
+            size != expected_header_line_size for size in body_section.header_bottom_border_sizes
         ):
             issues.append(
                 _issue(
@@ -571,12 +659,13 @@ def _check_static_headers_and_page_numbers(document: DocumentInfo, rules: RuleSe
                     Severity.WARNING,
                     "Body page header line width does not match the empty template.",
                     location=f"section {body_section.index}",
-                    expected=f"{_TEMPLATE_HEADER_LINE_SIZE} eighths of a point (0.75 pt)",
+                    expected=f"{expected_header_line_size} eighths of a point ({expected_header_line_size / 8:g} pt)",
                     actual=", ".join(_format_border_size(size) for size in body_section.header_bottom_border_sizes),
                 )
             )
+        expected_header_line_space = _int_cfg(rules, "header", "line_space")
         if body_section.header_bottom_border_spaces and any(
-            space != _TEMPLATE_HEADER_LINE_SPACE for space in body_section.header_bottom_border_spaces
+            space != expected_header_line_space for space in body_section.header_bottom_border_spaces
         ):
             issues.append(
                 _issue(
@@ -584,7 +673,7 @@ def _check_static_headers_and_page_numbers(document: DocumentInfo, rules: RuleSe
                     Severity.WARNING,
                     "Body page header line spacing from text does not match the empty template.",
                     location=f"section {body_section.index}",
-                    expected=f"space={_TEMPLATE_HEADER_LINE_SPACE}",
+                    expected=f"space={expected_header_line_space}",
                     actual=", ".join(f"space={space}" for space in body_section.header_bottom_border_spaces),
                 )
             )
@@ -616,7 +705,7 @@ def _check_static_headers_and_page_numbers(document: DocumentInfo, rules: RuleSe
             )
     return issues
 
-def _check_headings(document: DocumentInfo) -> list[Issue]:
+def _check_headings(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     for paragraph in document.paragraphs:
         if _is_toc_paragraph(paragraph):
@@ -625,7 +714,8 @@ def _check_headings(document: DocumentInfo) -> list[Issue]:
         level = _heading_level(paragraph)
         if not text or level is None:
             continue
-        if _has_trailing_punctuation(text):
+        level_config = _cfg(rules, "heading", "levels", str(level))
+        if _has_trailing_punctuation(text, rules):
             issues.append(
                 _issue(
                     "HEADING_PUNCTUATION",
@@ -635,15 +725,17 @@ def _check_headings(document: DocumentInfo) -> list[Issue]:
                     evidence=text,
                 )
             )
+        issues.extend(_check_heading_spacing(paragraph, level=level, rules=rules))
         if level == 1:
-            if paragraph.alignment is not None and paragraph.alignment != "center":
+            expected_alignment = str(level_config["alignment"])
+            if paragraph.alignment is not None and paragraph.alignment != expected_alignment:
                 issues.append(
                     _issue(
                         "HEADING_FORMAT",
                         Severity.WARNING,
-                        "Chapter heading should be centered.",
+                        "Chapter heading alignment should match the configured format.",
                         location=_paragraph_location(paragraph),
-                        expected="center",
+                        expected=expected_alignment,
                         actual=paragraph.alignment,
                         evidence=text,
                     )
@@ -652,20 +744,39 @@ def _check_headings(document: DocumentInfo) -> list[Issue]:
                 _check_explicit_run_format(
                     paragraph,
                     code="HEADING_FORMAT",
-                    expected_size_pt=18.0,
-                    expected_east_asia="黑体",
+                    expected_size_pt=float(level_config["size_pt"]),
+                    expected_east_asia=str(level_config["east_asia"]),
+                    expected_ascii=str(level_config["ascii"]),
+                    rules=rules,
                 )
             )
         elif level == 3:
-            if paragraph.alignment is not None and paragraph.alignment not in {"left", "both"}:
+            expected_alignment = _alignment_allowed(level_config["alignment"])
+            if paragraph.alignment is not None and paragraph.alignment not in expected_alignment:
                 issues.append(
                     _issue(
                         "HEADING_FORMAT",
                         Severity.WARNING,
-                        "Second-level heading should be left aligned.",
+                        "Third-level heading alignment should match the configured format.",
                         location=_paragraph_location(paragraph),
-                        expected="left",
+                        expected="/".join(sorted(expected_alignment)),
                         actual=paragraph.alignment,
+                        evidence=text,
+                    )
+                )
+            if (
+                paragraph.first_line_indent_chars is not None
+                and abs(paragraph.first_line_indent_chars - float(level_config["first_line_indent_chars"]))
+                > _float_cfg(rules, "tolerances", "indent_chars")
+            ):
+                issues.append(
+                    _issue(
+                        "HEADING_FORMAT",
+                        Severity.WARNING,
+                        "Third-level heading should not use first-line indent.",
+                        location=_paragraph_location(paragraph),
+                        expected="no first-line indent",
+                        actual=f"{paragraph.first_line_indent_chars:g} characters",
                         evidence=text,
                     )
                 )
@@ -673,20 +784,39 @@ def _check_headings(document: DocumentInfo) -> list[Issue]:
                 _check_explicit_run_format(
                     paragraph,
                     code="HEADING_FORMAT",
-                    expected_size_pt=14.0,
-                    expected_east_asia="黑体",
+                    expected_size_pt=float(level_config["size_pt"]),
+                    expected_east_asia=str(level_config["east_asia"]),
+                    expected_ascii=str(level_config["ascii"]),
+                    rules=rules,
                 )
             )
         elif level == 2:
-            if paragraph.alignment is not None and paragraph.alignment not in {"left", "both"}:
+            expected_alignment = _alignment_allowed(level_config["alignment"])
+            if paragraph.alignment is not None and paragraph.alignment not in expected_alignment:
                 issues.append(
                     _issue(
                         "HEADING_FORMAT",
                         Severity.WARNING,
-                        "First-level heading should be left aligned.",
+                        "Second-level heading alignment should match the configured format.",
                         location=_paragraph_location(paragraph),
-                        expected="left",
+                        expected="/".join(sorted(expected_alignment)),
                         actual=paragraph.alignment,
+                        evidence=text,
+                    )
+                )
+            if (
+                paragraph.first_line_indent_chars is not None
+                and abs(paragraph.first_line_indent_chars - float(level_config["first_line_indent_chars"]))
+                > _float_cfg(rules, "tolerances", "indent_chars")
+            ):
+                issues.append(
+                    _issue(
+                        "HEADING_FORMAT",
+                        Severity.WARNING,
+                        "Second-level heading should not use first-line indent.",
+                        location=_paragraph_location(paragraph),
+                        expected="no first-line indent",
+                        actual=f"{paragraph.first_line_indent_chars:g} characters",
                         evidence=text,
                     )
                 )
@@ -694,14 +824,118 @@ def _check_headings(document: DocumentInfo) -> list[Issue]:
                 _check_explicit_run_format(
                     paragraph,
                     code="HEADING_FORMAT",
-                    expected_size_pt=16.0,
-                    expected_east_asia="黑体",
+                    expected_size_pt=float(level_config["size_pt"]),
+                    expected_east_asia=str(level_config["east_asia"]),
+                    expected_ascii=str(level_config["ascii"]),
+                    rules=rules,
                 )
             )
     return issues
 
 
-def _check_numbering(paragraph: ParagraphInfo) -> list[Issue]:
+def _check_heading_spacing(
+    paragraph: ParagraphInfo, *, level: int | None = None, rules: RuleSet | None = None
+) -> list[Issue]:
+    issues: list[Issue] = []
+    text = paragraph.text.strip()
+    expected_space_lines = _float_cfg(rules, "heading", "space_lines")
+    expected_line_spacing_pt = _float_cfg(rules, "heading", "line_spacing_pt")
+    if not _space_lines_match(paragraph.space_before_lines, expected_space_lines, rules):
+        issues.append(
+            _issue(
+                "HEADING_SPACING",
+                Severity.WARNING,
+                "Heading paragraph space before should match the empty template.",
+                location=_paragraph_location(paragraph),
+                expected=f"{expected_space_lines:g} lines",
+                actual=_format_space_lines(paragraph.space_before_lines, paragraph.space_before_pt),
+                evidence=text,
+            )
+        )
+    if not _space_lines_match(paragraph.space_after_lines, expected_space_lines, rules):
+        issues.append(
+            _issue(
+                "HEADING_SPACING",
+                Severity.WARNING,
+                "Heading paragraph space after should match the empty template.",
+                location=_paragraph_location(paragraph),
+                expected=f"{expected_space_lines:g} lines",
+                actual=_format_space_lines(paragraph.space_after_lines, paragraph.space_after_pt),
+                evidence=text,
+            )
+        )
+    requires_fixed_line_spacing = level in {2, 3}
+    if level == 1 and (paragraph.line_spacing_pt is not None or paragraph.line_spacing_multiple is not None):
+        if paragraph.line_spacing_multiple is not None:
+            actual = f"{paragraph.line_spacing_multiple:g}x ({paragraph.line_spacing_rule or 'auto'})"
+        else:
+            actual = f"{paragraph.line_spacing_pt:.1f} pt ({paragraph.line_spacing_rule or 'not explicit'})"
+        issues.append(
+            _issue(
+                "HEADING_SPACING",
+                Severity.WARNING,
+                "Chapter heading line spacing should match the empty template.",
+                location=_paragraph_location(paragraph),
+                expected="empty-template chapter line spacing with no explicit override",
+                actual=actual,
+                evidence=text,
+            )
+        )
+    elif requires_fixed_line_spacing and paragraph.line_spacing_pt is None and paragraph.line_spacing_multiple is None:
+        issues.append(
+            _issue(
+                "HEADING_SPACING",
+                Severity.WARNING,
+                "Section heading line spacing should match the empty template.",
+                location=_paragraph_location(paragraph),
+                expected=f"fixed {expected_line_spacing_pt:g} pt",
+                actual="not explicit",
+                evidence=text,
+            )
+        )
+    elif paragraph.line_spacing_multiple is not None:
+        issues.append(
+            _issue(
+                "HEADING_SPACING",
+                Severity.WARNING,
+                "Heading line spacing should match the empty template.",
+                location=_paragraph_location(paragraph),
+                expected=f"fixed {expected_line_spacing_pt:g} pt",
+                actual=f"{paragraph.line_spacing_multiple:g}x ({paragraph.line_spacing_rule or 'auto'})",
+                evidence=text,
+            )
+        )
+    elif paragraph.line_spacing_pt is not None:
+        if paragraph.line_spacing_rule not in {None, "exact", "fixed"}:
+            issues.append(
+                _issue(
+                    "HEADING_SPACING",
+                    Severity.WARNING,
+                    "Heading line spacing should match the empty template.",
+                    location=_paragraph_location(paragraph),
+                    expected=f"fixed {expected_line_spacing_pt:g} pt",
+                    actual=f"{paragraph.line_spacing_pt:.1f} pt ({paragraph.line_spacing_rule})",
+                    evidence=text,
+                )
+            )
+        elif abs(paragraph.line_spacing_pt - expected_line_spacing_pt) > _float_cfg(
+            rules, "tolerances", "line_spacing_pt"
+        ):
+            issues.append(
+                _issue(
+                    "HEADING_SPACING",
+                    Severity.WARNING,
+                    "Heading line spacing should match the empty template.",
+                    location=_paragraph_location(paragraph),
+                    expected=f"{expected_line_spacing_pt:g} pt",
+                    actual=f"{paragraph.line_spacing_pt:.1f} pt",
+                    evidence=text,
+                )
+            )
+    return issues
+
+
+def _check_numbering(paragraph: ParagraphInfo, rules: RuleSet | None = None) -> list[Issue]:
     if _is_toc_paragraph(paragraph):
         return []
     text = paragraph.text.strip()
@@ -709,7 +943,7 @@ def _check_numbering(paragraph: ParagraphInfo) -> list[Issue]:
         return []
 
     issues: list[Issue] = []
-    if _FIGURE_DOT_RE.search(text):
+    if _numbering_pattern(rules, "figure_dot_pattern").search(text):
         issues.append(
             _issue(
                 "FIGURE_NUMBERING",
@@ -719,7 +953,7 @@ def _check_numbering(paragraph: ParagraphInfo) -> list[Issue]:
                 evidence=text,
             )
         )
-    if _TABLE_DOT_RE.search(text):
+    if _numbering_pattern(rules, "table_dot_pattern").search(text):
         issues.append(
             _issue(
                 "TABLE_NUMBERING",
@@ -729,7 +963,7 @@ def _check_numbering(paragraph: ParagraphInfo) -> list[Issue]:
                 evidence=text,
             )
         )
-    if _EQUATION_DOT_RE.search(text):
+    if _numbering_pattern(rules, "equation_dot_pattern").search(text):
         issues.append(
             _issue(
                 "EQUATION_NUMBERING",
@@ -742,18 +976,39 @@ def _check_numbering(paragraph: ParagraphInfo) -> list[Issue]:
     return issues
 
 
-def _check_keywords(document: DocumentInfo) -> list[Issue]:
+def _check_keywords(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
+    expected_delimiter = str(_cfg(rules, "keywords", "label_delimiter"))
+    allow_space_before_delimiter = bool(_cfg(rules, "keywords", "allow_space_before_delimiter"))
+    allow_space_after_delimiter = bool(_cfg(rules, "keywords", "allow_space_after_delimiter"))
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
-        match = _KEYWORD_LINE_RE.match(text)
-        if not match:
+        match = _keyword_line_parts(text, rules)
+        if match is None:
             continue
 
-        label = match.group(1)
-        keyword_text = match.group(2).strip()
-        items, has_ascii_separator, has_trailing_separator = _split_keywords(keyword_text)
+        label = match["label"]
+        expected_label = match["expected_label"]
+        keyword_text = match["body"].strip()
+        items, has_ascii_separator, has_trailing_separator = _split_keywords(keyword_text, rules)
 
+        if (
+            label != expected_label
+            or match["delimiter"] != expected_delimiter
+            or (match["space_before"] and not allow_space_before_delimiter)
+            or (match["space_after"] and not allow_space_after_delimiter)
+        ):
+            issues.append(
+                _issue(
+                    "KEYWORD_LABEL_FORMAT",
+                    Severity.WARNING,
+                    f"{expected_label} line label and delimiter should match the configured format.",
+                    location=_paragraph_location(paragraph),
+                    expected=f"{expected_label}{expected_delimiter}",
+                    actual=text[: len(text) - len(match["body"])],
+                    evidence=text,
+                )
+            )
         if has_ascii_separator:
             issues.append(
                 _issue(
@@ -774,14 +1029,16 @@ def _check_keywords(document: DocumentInfo) -> list[Issue]:
                     evidence=text,
                 )
             )
-        if not 3 <= len(items) <= 5:
+        min_count = _int_cfg(rules, "keywords", "min_count")
+        max_count = _int_cfg(rules, "keywords", "max_count")
+        if not min_count <= len(items) <= max_count:
             issues.append(
                 _issue(
                     "KEYWORD_COUNT",
                     Severity.WARNING,
                     f"{label} line should contain 3 to 5 keywords.",
                     location=_paragraph_location(paragraph),
-                    expected="3-5 keywords",
+                    expected=f"{min_count}-{max_count} keywords",
                     actual=f"{len(items)} keywords",
                     evidence=text,
                 )
@@ -789,18 +1046,11 @@ def _check_keywords(document: DocumentInfo) -> list[Issue]:
     return issues
 
 
-def _check_structure_presence(document: DocumentInfo) -> list[Issue]:
+def _check_structure_presence(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     texts = [paragraph.text.strip() for paragraph in document.paragraphs if not _is_toc_paragraph(paragraph)]
     normalized = [text.replace(" ", "") for text in texts]
-    required = {
-        "STRUCTURE_ABSTRACT_CN": ("摘  要", "Chinese abstract heading was not detected."),
-        "STRUCTURE_ABSTRACT_EN": ("Abstract", "English abstract heading was not detected."),
-        "STRUCTURE_TOC": ("目录", "Table of contents heading was not detected."),
-        "STRUCTURE_BODY_START": ("第1章", "Chapter 1 heading was not detected."),
-        "STRUCTURE_REFERENCES": ("参考文献", "References heading was not detected."),
-        "STRUCTURE_THANKS": ("致谢", "Acknowledgements heading was not detected."),
-    }
+    required = _cfg(rules, "structure", "required")
     for code, (needle, message) in required.items():
         if code == "STRUCTURE_TOC":
             found = any("目录" in text.replace(" ", "") for text in texts)
@@ -815,23 +1065,23 @@ def _check_structure_presence(document: DocumentInfo) -> list[Issue]:
     return issues
 
 
-def _major_heading_key(text: str) -> str | None:
+def _major_heading_key(text: str, rules: RuleSet | None = None) -> str | None:
     compact = re.sub(r"[\s\u3000]+", "", text.strip())
-    return compact if compact in _MAJOR_HEADING_EXPECTED else None
+    return compact if compact in _cfg(rules, "structure", "major_heading_expected") else None
 
 
-def _check_major_heading_spacing(document: DocumentInfo) -> list[Issue]:
+def _check_major_heading_spacing(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     seen: set[str] = set()
     for paragraph in document.paragraphs:
         if _is_toc_paragraph(paragraph):
             continue
         text = paragraph.text.strip()
-        key = _major_heading_key(text)
+        key = _major_heading_key(text, rules)
         if key is None or key in seen:
             continue
         seen.add(key)
-        expected = _MAJOR_HEADING_EXPECTED[key]
+        expected = _cfg(rules, "structure", "major_heading_expected")[key]
         if text != expected:
             issues.append(
                 _issue(
@@ -847,20 +1097,22 @@ def _check_major_heading_spacing(document: DocumentInfo) -> list[Issue]:
     return issues
 
 
-def _check_abstract_format(document: DocumentInfo) -> list[Issue]:
+def _check_abstract_format(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
+    expected_alignment = str(_cfg(rules, "abstract", "alignment"))
+    expected_size_pt = _float_cfg(rules, "abstract", "heading_size_pt")
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
         normalized = text.replace(" ", "")
         if normalized == "摘要":
-            if paragraph.alignment is not None and paragraph.alignment != "center":
+            if paragraph.alignment is not None and paragraph.alignment != expected_alignment:
                 issues.append(
                     _issue(
                         "ABSTRACT_FORMAT",
                         Severity.WARNING,
-                        "Chinese abstract heading should be centered.",
+                        "Chinese abstract heading alignment should match the configured format.",
                         location=_paragraph_location(paragraph),
-                        expected="center",
+                        expected=expected_alignment,
                         actual=paragraph.alignment,
                         evidence=text,
                     )
@@ -869,19 +1121,20 @@ def _check_abstract_format(document: DocumentInfo) -> list[Issue]:
                 _check_explicit_run_format(
                     paragraph,
                     code="ABSTRACT_FORMAT",
-                    expected_size_pt=18.0,
-                    expected_east_asia="黑体",
+                    expected_size_pt=expected_size_pt,
+                    expected_east_asia=str(_cfg(rules, "abstract", "cn_font")),
+                    rules=rules,
                 )
             )
         elif text == "Abstract":
-            if paragraph.alignment is not None and paragraph.alignment != "center":
+            if paragraph.alignment is not None and paragraph.alignment != expected_alignment:
                 issues.append(
                     _issue(
                         "ABSTRACT_FORMAT",
                         Severity.WARNING,
-                        "English abstract heading should be centered.",
+                        "English abstract heading alignment should match the configured format.",
                         location=_paragraph_location(paragraph),
-                        expected="center",
+                        expected=expected_alignment,
                         actual=paragraph.alignment,
                         evidence=text,
                     )
@@ -890,9 +1143,10 @@ def _check_abstract_format(document: DocumentInfo) -> list[Issue]:
                 _check_explicit_run_format(
                     paragraph,
                     code="ABSTRACT_FORMAT",
-                    expected_size_pt=18.0,
-                    expected_ascii="Times New Roman",
-                    require_bold=True,
+                    expected_size_pt=expected_size_pt,
+                    expected_ascii=str(_cfg(rules, "abstract", "en_font")),
+                    require_bold=bool(_cfg(rules, "abstract", "en_bold")),
+                    rules=rules,
                 )
             )
     return issues
@@ -953,7 +1207,161 @@ def _check_toc_fields(document: DocumentInfo) -> list[Issue]:
     ]
 
 
-def _check_table_borders(document: DocumentInfo) -> list[Issue]:
+def _reference_entry_numbers(document: DocumentInfo) -> set[int]:
+    numbers: set[int] = set()
+    reference_started = False
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if not text or _is_toc_paragraph(paragraph):
+            continue
+        normalized = text.replace(" ", "")
+        if not reference_started:
+            if _is_reference_heading(text):
+                reference_started = True
+            continue
+        if _is_heading_text(text) or normalized in {"致谢", "附录", "附录A", "附录B"}:
+            break
+        match = _REFERENCE_ENTRY_RE.match(text)
+        if match:
+            numbers.add(int(match.group(1)))
+    return numbers
+
+
+def _citation_numbers(raw: str) -> set[int]:
+    parts = re.split(r"[,，]", raw)
+    numbers: set[int] = set()
+    for part in parts:
+        stripped = part.strip()
+        if not stripped:
+            continue
+        if "-" in stripped:
+            start_text, end_text = [item.strip() for item in stripped.split("-", 1)]
+            if start_text.isdigit() and end_text.isdigit():
+                start = int(start_text)
+                end = int(end_text)
+                if start <= end:
+                    numbers.update(range(start, end + 1))
+                else:
+                    numbers.update({start, end})
+            continue
+        if stripped.isdigit():
+            numbers.add(int(stripped))
+    return numbers
+
+
+def _run_spans(paragraph: ParagraphInfo) -> list[tuple[int, int, object]]:
+    spans = []
+    offset = 0
+    for run in paragraph.runs:
+        start = offset
+        end = start + len(run.text)
+        spans.append((start, end, run))
+        offset = end
+    return spans
+
+
+def _runs_overlapping(paragraph: ParagraphInfo, start: int, end: int):
+    for run_start, run_end, run in _run_spans(paragraph):
+        if run_end <= start or run_start >= end:
+            continue
+        yield run
+
+
+def _citation_is_superscript(paragraph: ParagraphInfo, start: int, end: int) -> bool:
+    runs = list(_runs_overlapping(paragraph, start, end))
+    return bool(runs) and all(run.vertical_align == "superscript" for run in runs)
+
+
+def _has_reference_field(paragraph: ParagraphInfo) -> bool:
+    return any(re.search(r"\b(?:REF|NOTEREF)\b", instruction.upper()) for instruction in paragraph.field_instructions)
+
+
+def _check_reference_citations(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
+    issues: list[Issue] = []
+    reference_numbers = _reference_entry_numbers(document)
+    cited_numbers: set[int] = set()
+    reference_start = _reference_heading_index(document)
+    expected_separator = str(_cfg(rules, "reference", "citation_separator"))
+    for paragraph in document.paragraphs:
+        if not _in_body_range(paragraph, document):
+            continue
+        if reference_start is not None and paragraph.index >= reference_start:
+            continue
+        if _is_toc_paragraph(paragraph):
+            continue
+        raw_text = paragraph.text
+        text = raw_text.strip()
+        if not text or _is_heading_paragraph(paragraph) or _is_caption_text(text, rules):
+            continue
+        for match in _REFERENCE_CITATION_RE.finditer(raw_text):
+            citation_text = match.group(0)
+            citation_inner = match.group(1)
+            numbers = _citation_numbers(match.group(1))
+            cited_numbers.update(numbers)
+            if "," in citation_inner and expected_separator != ",":
+                issues.append(
+                    _issue(
+                        "REFERENCE_CITATION_SEPARATOR",
+                        Severity.WARNING,
+                        "Multiple reference numbers in one superscript citation should use the configured separator.",
+                        location=_paragraph_location(paragraph),
+                        expected=f"Chinese comma separator, e.g. [1{expected_separator}2]",
+                        actual=citation_text,
+                        evidence=citation_text,
+                    )
+                )
+            if not _citation_is_superscript(paragraph, match.start(), match.end()):
+                issues.append(
+                    _issue(
+                        "REFERENCE_CITATION_FORMAT",
+                        Severity.WARNING,
+                        "In-text reference citation should be superscript.",
+                        location=_paragraph_location(paragraph),
+                        expected="superscript citation like [1]",
+                        actual="not superscript or not explicit",
+                        evidence=citation_text,
+                    )
+                )
+            if not _has_reference_field(paragraph):
+                issues.append(
+                    _issue(
+                        "REFERENCE_CITATION_FIELD",
+                        Severity.WARNING,
+                        "In-text reference citation does not appear to use a Word cross-reference field.",
+                        location=_paragraph_location(paragraph),
+                        expected="Word REF/NOTEREF field for the citation",
+                        actual="field code not detected",
+                        evidence=citation_text,
+                    )
+                )
+            missing_targets = sorted(number for number in numbers if number not in reference_numbers)
+            if missing_targets and reference_numbers:
+                issues.append(
+                    _issue(
+                        "REFERENCE_CITATION_TARGET",
+                        Severity.WARNING,
+                        "In-text reference citation points to a number not found in the reference list.",
+                        location=_paragraph_location(paragraph),
+                        expected="citation number exists in references",
+                        actual=", ".join(str(number) for number in missing_targets),
+                        evidence=citation_text,
+                    )
+                )
+    for number in sorted(reference_numbers - cited_numbers):
+        issues.append(
+            _issue(
+                "REFERENCE_CITATION_TARGET",
+                Severity.INFO,
+                "Reference entry is not cited in the body text.",
+                location="references",
+                expected=f"[{number}] cited in body text",
+                actual="not cited",
+            )
+        )
+    return issues
+
+
+def _check_table_borders(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     first_body = _first_body_paragraph_index(document)
     reference_start = _reference_heading_index(document)
@@ -997,58 +1405,106 @@ def _check_table_borders(document: DocumentInfo) -> list[Issue]:
                     evidence=", ".join(table.border_values[:12]),
                 )
             )
-        issues.extend(_check_table_template_layout(table))
+        issues.extend(_check_table_template_layout(table, rules))
     return issues
 
 
-def _check_table_template_layout(table: TableInfo) -> list[Issue]:
+def _check_table_template_layout(table: TableInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
-    if table.horizontal_line_count is not None and table.horizontal_line_count != _TEMPLATE_TABLE_HORIZONTAL_LINE_COUNT:
+    expected_line_count = _int_cfg(rules, "table", "horizontal_line_count")
+    expected_width_type = str(_cfg(rules, "table", "width_type"))
+    expected_width_value = _int_cfg(rules, "table", "width_value")
+    expected_alignment = str(_cfg(rules, "table", "alignment"))
+    expected_cell_vertical_alignment = str(_cfg(rules, "table", "cell_vertical_alignment"))
+    expected_outer_border_size = _int_cfg(rules, "table", "outer_border_size_eighths")
+    expected_header_border_size = _int_cfg(rules, "table", "header_bottom_border_size_eighths")
+    if table.horizontal_line_count is not None and table.horizontal_line_count != expected_line_count:
         issues.append(
             _issue(
                 "TABLE_LINE_COUNT",
                 Severity.WARNING,
                 "Table should have exactly three visible horizontal lines.",
                 location=f"table {table.index}",
-                expected=f"{_TEMPLATE_TABLE_HORIZONTAL_LINE_COUNT} horizontal lines",
+                expected=f"{expected_line_count} horizontal lines",
                 actual=f"{table.horizontal_line_count} horizontal lines",
                 evidence=", ".join(table.horizontal_line_positions),
             )
         )
-    if table.width_type != _TEMPLATE_TABLE_WIDTH_TYPE or table.width_value != _TEMPLATE_TABLE_WIDTH_VALUE:
+    if table.width_type != expected_width_type or table.width_value != expected_width_value:
         issues.append(
             _issue(
                 "TABLE_WIDTH",
-                Severity.INFO,
+                Severity.WARNING,
                 "Table width does not match the empty template.",
                 location=f"table {table.index}",
-                expected="100% page text width (w:tblW type=pct w=5000)",
+                expected=f"100% page text width (w:tblW type={expected_width_type} w={expected_width_value})",
                 actual=f"type={table.width_type or 'not explicit'} w={table.width_value or 'not explicit'}",
             )
         )
-    if table.alignment != _TEMPLATE_TABLE_ALIGNMENT:
+    for row_index, (width_types, width_values) in enumerate(zip(table.cell_width_types, table.cell_width_values), start=1):
+        if any(width_type != expected_width_type for width_type in width_types):
+            issues.append(
+                _issue(
+                    "TABLE_CELL_WIDTH",
+                    Severity.WARNING,
+                    "Table cell widths should use percentage widths like the empty template.",
+                    location=f"table {table.index} row {row_index}",
+                    expected=f"all cells type={expected_width_type}",
+                    actual=", ".join(width_type or "not explicit" for width_type in width_types),
+                )
+            )
+            continue
+        explicit_widths = [value for value in width_values if value is not None]
+        if len(explicit_widths) != len(width_values) or sum(explicit_widths) != expected_width_value:
+            issues.append(
+                _issue(
+                    "TABLE_CELL_WIDTH",
+                    Severity.WARNING,
+                    "Table cell width sum should match the empty template table width.",
+                    location=f"table {table.index} row {row_index}",
+                    expected=f"cell widths sum={expected_width_value}",
+                    actual=", ".join(str(value) if value is not None else "not explicit" for value in width_values),
+                )
+            )
+    if table.alignment != expected_alignment:
         issues.append(
             _issue(
                 "TABLE_ALIGNMENT",
                 Severity.WARNING,
                 "Table alignment does not match the empty template.",
                 location=f"table {table.index}",
-                expected="center",
+                expected=expected_alignment,
                 actual=table.alignment or "not explicit",
+            )
+        )
+    bad_vertical_alignments = [
+        alignment or "not explicit"
+        for alignment in table.cell_vertical_alignments
+        if alignment != expected_cell_vertical_alignment
+    ]
+    if bad_vertical_alignments:
+        issues.append(
+            _issue(
+                "TABLE_CELL_ALIGNMENT",
+                Severity.WARNING,
+                "Table cell vertical alignment should match the configured format.",
+                location=f"table {table.index}",
+                expected=f"vertical alignment={expected_cell_vertical_alignment}",
+                actual=", ".join(bad_vertical_alignments[:8]),
             )
         )
 
     border_sizes = _table_border_size_map(table)
     for border_name in ("top", "bottom"):
         actual_size = border_sizes.get(border_name)
-        if actual_size != _TEMPLATE_TABLE_OUTER_BORDER_SIZE:
+        if actual_size != expected_outer_border_size:
             issues.append(
                 _issue(
                     "TABLE_BORDER_WIDTH",
                     Severity.WARNING,
                     "Table outer border width does not match the empty template.",
                     location=f"table {table.index}",
-                    expected=f"{_TEMPLATE_TABLE_OUTER_BORDER_SIZE} eighths of a point (2.25 pt)",
+                    expected=f"{expected_outer_border_size} eighths of a point ({expected_outer_border_size / 8:g} pt)",
                     actual=(
                         _format_border_size(actual_size)
                         if actual_size is not None
@@ -1063,7 +1519,7 @@ def _check_table_template_layout(table: TableInfo) -> list[Issue]:
     if (
         not header_sizes
         or len(header_sizes) < expected_header_cells
-        or any(size != _TEMPLATE_TABLE_HEADER_BOTTOM_BORDER_SIZE for size in header_sizes)
+        or any(size != expected_header_border_size for size in header_sizes)
     ):
         issues.append(
             _issue(
@@ -1071,7 +1527,7 @@ def _check_table_template_layout(table: TableInfo) -> list[Issue]:
                 Severity.WARNING,
                 "Table header bottom border width does not match the empty template.",
                 location=f"table {table.index}",
-                expected=f"{_TEMPLATE_TABLE_HEADER_BOTTOM_BORDER_SIZE} eighths of a point (0.75 pt) on each header cell",
+                expected=f"{expected_header_border_size} eighths of a point ({expected_header_border_size / 8:g} pt) on each header cell",
                 actual=", ".join(_format_border_size(size) for size in header_sizes) if header_sizes else "not explicit",
             )
         )
@@ -1111,27 +1567,58 @@ def _table_border_size_map(table: TableInfo) -> dict[str, int]:
     return result
 
 
+def _space_lines_match(actual: float | None, expected: float, rules: RuleSet | None = None) -> bool:
+    return actual is not None and abs(actual - expected) <= _float_cfg(rules, "tolerances", "line_space_lines")
+
+
+def _space_pt_match(actual: float | None, expected: float, rules: RuleSet | None = None) -> bool:
+    if actual is None:
+        actual = 0.0
+    return abs(actual - expected) <= _float_cfg(rules, "tolerances", "line_spacing_pt")
+
+
+def _format_space_lines(space_lines: float | None, space_pt: float | None) -> str:
+    if space_lines is not None:
+        return f"{space_lines:g} lines"
+    if space_pt is not None:
+        return f"{space_pt:g} pt"
+    return "not explicit"
+
+
+def _format_space_pt(space_pt: float | None) -> str:
+    if space_pt is None:
+        return "not explicit (treated as 0 pt)"
+    return f"{space_pt:g} pt"
+
+
 def _format_border_size(size: int) -> str:
     return f"{size} eighths of a point ({size / 8:g} pt)"
 
 
-def _caption_paragraphs(document: DocumentInfo) -> list[tuple[ParagraphInfo, str]]:
+def _caption_paragraphs(document: DocumentInfo, rules: RuleSet | None = None) -> list[tuple[ParagraphInfo, str]]:
     result: list[tuple[ParagraphInfo, str]] = []
     for paragraph in document.paragraphs:
-        if _is_caption_text(paragraph.text):
+        if _is_caption_text(paragraph.text, rules):
             result.append((paragraph, _paragraph_location(paragraph)))
     for table in document.tables:
         for paragraph in table.paragraphs:
-            if _is_caption_text(paragraph.text):
+            if _is_caption_text(paragraph.text, rules):
                 result.append((paragraph, f"table {table.index} paragraph {paragraph.index}"))
     return result
 
 
-def _check_captions(document: DocumentInfo) -> list[Issue]:
+def _check_captions(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
-    for paragraph, location in _caption_paragraphs(document):
+    expected_alignment = str(_cfg(rules, "caption", "alignment"))
+    expected_indent = _float_cfg(rules, "caption", "first_line_indent_chars")
+    expected_size = _float_cfg(rules, "caption", "size_pt")
+    expected_east_asia = str(_cfg(rules, "caption", "east_asia"))
+    expected_ascii = str(_cfg(rules, "caption", "ascii"))
+    expected_line_spacing = _float_cfg(rules, "caption", "line_spacing_pt")
+    expected_separator = str(_cfg(rules, "caption", "separator"))
+    for paragraph, location in _caption_paragraphs(document, rules):
         text = paragraph.text.strip()
-        match = _CAPTION_RE.match(text)
+        match = _numbering_pattern(rules, "caption_pattern").match(text)
         if not match:
             issues.append(
                 _issue(
@@ -1144,7 +1631,7 @@ def _check_captions(document: DocumentInfo) -> list[Issue]:
                     evidence=text,
                 )
             )
-        elif match.group(3) != " ":
+        elif match.group(3) != expected_separator:
             issues.append(
                 _issue(
                     "CAPTION_SEPARATOR",
@@ -1157,55 +1644,71 @@ def _check_captions(document: DocumentInfo) -> list[Issue]:
                 )
             )
 
-        if paragraph.alignment is not None and paragraph.alignment != "center":
+        if paragraph.alignment is not None and paragraph.alignment != expected_alignment:
             issues.append(
                 _issue(
                     "CAPTION_FORMAT",
                     Severity.WARNING,
-                    "Caption should be centered.",
+                    "Caption alignment should match the configured format.",
                     location=location,
-                    expected="center",
+                    expected=expected_alignment,
                     actual=paragraph.alignment,
+                    evidence=text,
+                )
+            )
+        if paragraph.first_line_indent_chars is not None and abs(
+            paragraph.first_line_indent_chars - expected_indent
+        ) > _float_cfg(rules, "tolerances", "indent_chars"):
+            issues.append(
+                _issue(
+                    "CAPTION_FORMAT",
+                    Severity.WARNING,
+                    "Caption first-line indent should match the configured format.",
+                    location=location,
+                    expected="no first-line indent",
+                    actual=f"{paragraph.first_line_indent_chars:g} characters",
                     evidence=text,
                 )
             )
 
         for run in _visible_runs(paragraph):
-            if run.size_pt is not None and abs(run.size_pt - 12.0) > _FONT_SIZE_TOLERANCE_PT:
+            if run.size_pt is not None and abs(run.size_pt - expected_size) > _float_cfg(
+                rules, "tolerances", "font_size_pt"
+            ):
                 issues.append(
                     _issue(
                         "CAPTION_FORMAT",
                         Severity.WARNING,
-                        "Caption font size should be xiaosi / 12 pt.",
+                        "Caption font size should match the configured format.",
                         location=location,
-                        expected="12 pt",
+                        expected=f"{expected_size:g} pt",
                         actual=f"{run.size_pt:g} pt",
                         evidence=text,
                     )
                 )
                 break
-            if run.font_east_asia is not None and not _font_matches(run.font_east_asia, "宋体"):
+            if run.font_east_asia is not None and not _font_matches(run.font_east_asia, expected_east_asia):
                 issues.append(
                     _issue(
                         "CAPTION_FORMAT",
                         Severity.WARNING,
-                        "Caption East Asian font should be Songti.",
+                        "Caption East Asian font should match the configured format.",
                         location=location,
-                        expected="宋体",
+                        expected=expected_east_asia,
                         actual=_run_font_actual(run),
                         evidence=text,
                     )
                 )
                 break
             if _has_ascii_word(run.text) and run.font_ascii is not None:
-                if not _font_matches(run.font_ascii, "宋体"):
+                if not _font_matches(run.font_ascii, expected_ascii):
                     issues.append(
                         _issue(
                             "CAPTION_FORMAT",
                             Severity.WARNING,
-                            "Caption ASCII text and numbers should follow the caption Songti style.",
+                            "Caption ASCII text and numbers should match the configured format.",
                             location=location,
-                            expected="宋体",
+                            expected=expected_ascii,
                             actual=_run_font_actual(run),
                             evidence=text,
                         )
@@ -1217,9 +1720,9 @@ def _check_captions(document: DocumentInfo) -> list[Issue]:
                 _issue(
                     "CAPTION_LINE_SPACING",
                     Severity.WARNING,
-                    "Caption line spacing should be fixed at 20 pt, not multiple/auto line spacing.",
+                    "Caption line spacing should match the configured fixed-line format, not multiple/auto line spacing.",
                     location=location,
-                    expected="fixed 20 pt",
+                    expected=f"fixed {expected_line_spacing:g} pt",
                     actual=f"{paragraph.line_spacing_multiple:g}x ({paragraph.line_spacing_rule or 'auto'})",
                     evidence=text,
                 )
@@ -1230,21 +1733,23 @@ def _check_captions(document: DocumentInfo) -> list[Issue]:
                     _issue(
                         "CAPTION_LINE_SPACING",
                         Severity.WARNING,
-                        "Caption line spacing should be fixed at 20 pt.",
+                        "Caption line spacing should match the configured fixed-line format.",
                         location=location,
-                        expected="fixed 20 pt",
+                        expected=f"fixed {expected_line_spacing:g} pt",
                         actual=f"{paragraph.line_spacing_pt:.1f} pt ({paragraph.line_spacing_rule})",
                         evidence=text,
                     )
                 )
-            elif abs(paragraph.line_spacing_pt - 20.0) > _LINE_SPACING_TOLERANCE_PT:
+            elif abs(paragraph.line_spacing_pt - expected_line_spacing) > _float_cfg(
+                rules, "tolerances", "line_spacing_pt"
+            ):
                 issues.append(
                     _issue(
                         "CAPTION_LINE_SPACING",
                         Severity.WARNING,
-                        "Caption line spacing should be fixed at 20 pt.",
+                        "Caption line spacing should match the configured fixed-line format.",
                         location=location,
-                        expected="20 pt",
+                        expected=f"{expected_line_spacing:g} pt",
                         actual=f"{paragraph.line_spacing_pt:.1f} pt",
                         evidence=text,
                     )
@@ -1252,14 +1757,14 @@ def _check_captions(document: DocumentInfo) -> list[Issue]:
     return issues
 
 
-def _check_caption_object_order(document: DocumentInfo) -> list[Issue]:
+def _check_caption_object_order(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     tables_by_block = [table for table in document.tables if table.block_index is not None]
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
         if not _in_body_range(paragraph, document):
             continue
-        if _FIGURE_CAPTION_RE.match(text):
+        if _numbering_pattern(rules, "figure_caption_pattern").match(text):
             previous = _previous_content_paragraph(document, paragraph.index)
             if previous is not None and not previous.has_drawing:
                 next_paragraph = _next_nonempty_paragraph(document, paragraph.index)
@@ -1275,7 +1780,7 @@ def _check_caption_object_order(document: DocumentInfo) -> list[Issue]:
                             evidence=text,
                         )
                     )
-        if _TABLE_CAPTION_RE.match(text) and paragraph.block_index is not None:
+        if _numbering_pattern(rules, "table_caption_pattern").match(text) and paragraph.block_index is not None:
             previous_table = next(
                 (table for table in reversed(tables_by_block) if table.block_index is not None and table.block_index < paragraph.block_index),
                 None,
@@ -1314,12 +1819,12 @@ def _check_caption_object_order(document: DocumentInfo) -> list[Issue]:
     return issues
 
 
-def _check_continued_table_layout(document: DocumentInfo) -> list[Issue]:
+def _check_continued_table_layout(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     tables_by_block = [table for table in document.tables if table.block_index is not None]
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
-        if not _CONTINUED_TABLE_CAPTION_RE.match(text):
+        if not _numbering_pattern(rules, "continued_table_caption_pattern").match(text):
             continue
         if paragraph.block_index is None:
             issues.append(
@@ -1404,8 +1909,12 @@ def _check_continued_table_layout(document: DocumentInfo) -> list[Issue]:
     return issues
 
 
-def _check_table_cell_typography(document: DocumentInfo) -> list[Issue]:
+def _check_table_cell_typography(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
+    expected_cell_alignment = str(_cfg(rules, "table", "cell_alignment"))
+    expected_cell_size = _float_cfg(rules, "table", "cell_size_pt")
+    expected_cell_ascii = str(_cfg(rules, "table", "cell_ascii"))
+    expected_cell_east_asia = str(_cfg(rules, "table", "cell_east_asia"))
     first_body = _first_body_paragraph_index(document)
     reference_start = _reference_heading_index(document)
     reference_block = document.paragraphs[reference_start].block_index if reference_start is not None else None
@@ -1418,51 +1927,109 @@ def _check_table_cell_typography(document: DocumentInfo) -> list[Issue]:
             continue
         for paragraph in table.paragraphs:
             text = paragraph.text.strip()
-            if not text or _is_caption_text(text):
+            if not text or _is_caption_text(text, rules):
                 continue
             location = f"table {table.index} paragraph {paragraph.index}"
+            if paragraph.alignment != expected_cell_alignment:
+                issues.append(
+                    _issue(
+                        "TABLE_CELL_ALIGNMENT",
+                        Severity.WARNING,
+                        "Table cell paragraph alignment should match the configured format.",
+                        location=location,
+                        expected=expected_cell_alignment,
+                        actual=paragraph.alignment or "not explicit",
+                        evidence=text,
+                    )
+                )
+            issues.extend(_check_table_cell_spacing(paragraph, location, rules))
             for run in _visible_runs(paragraph):
-                if run.size_pt is not None and abs(run.size_pt - 12.0) > _FONT_SIZE_TOLERANCE_PT:
+                if run.size_pt is not None and abs(run.size_pt - expected_cell_size) > _float_cfg(
+                    rules, "tolerances", "font_size_pt"
+                ):
                     issues.append(
                         _issue(
                             "TABLE_CELL_FORMAT",
                             Severity.WARNING,
-                            "Table cell text should be xiaosi / 12 pt.",
+                            "Table cell text size should match the configured format.",
                             location=location,
-                            expected="12 pt",
+                            expected=f"{expected_cell_size:g} pt",
                             actual=f"{run.size_pt:g} pt",
                             evidence=text,
                         )
                     )
                     break
                 if _has_ascii_word(run.text) and run.font_ascii is not None:
-                    if not _font_matches(run.font_ascii, "Times New Roman"):
+                    if not _font_matches(run.font_ascii, expected_cell_ascii):
                         issues.append(
                             _issue(
                                 "TABLE_CELL_FONT",
                                 Severity.WARNING,
-                                "Table cell English and numbers should use Times New Roman.",
+                                "Table cell English and numbers should match the configured font.",
                                 location=location,
-                                expected="Times New Roman",
+                                expected=expected_cell_ascii,
                                 actual=_run_font_actual(run),
                                 evidence=text,
                             )
                         )
                         break
                 if _has_cjk(run.text) and run.font_east_asia is not None:
-                    if not _font_matches(run.font_east_asia, "宋体"):
+                    if not _font_matches(run.font_east_asia, expected_cell_east_asia):
                         issues.append(
                             _issue(
                                 "TABLE_CELL_FONT",
                                 Severity.WARNING,
-                                "Table cell Chinese text should use Songti.",
+                                "Table cell Chinese text should match the configured font.",
                                 location=location,
-                                expected="宋体",
+                                expected=expected_cell_east_asia,
                                 actual=_run_font_actual(run),
                                 evidence=text,
                             )
                         )
                         break
+    return issues
+
+
+def _check_table_cell_spacing(
+    paragraph: ParagraphInfo, location: str, rules: RuleSet | None = None
+) -> list[Issue]:
+    issues: list[Issue] = []
+    text = paragraph.text.strip()
+    expected_before = _float_cfg(rules, "table", "cell_space_before_pt")
+    expected_after = _float_cfg(rules, "table", "cell_space_after_pt")
+    if not _space_pt_match(paragraph.space_before_pt, expected_before, rules):
+        issues.append(
+            _issue(
+                "TABLE_CELL_SPACING",
+                Severity.WARNING,
+                "Table cell paragraph space before should match the configured format.",
+                location=location,
+                expected=f"{expected_before:g} pt",
+                actual=_format_space_pt(paragraph.space_before_pt),
+                evidence=text,
+            )
+        )
+    if not _space_pt_match(paragraph.space_after_pt, expected_after, rules):
+        issues.append(
+            _issue(
+                "TABLE_CELL_SPACING",
+                Severity.WARNING,
+                "Table cell paragraph space after should match the configured format.",
+                location=location,
+                expected=f"{expected_after:g} pt",
+                actual=_format_space_pt(paragraph.space_after_pt),
+                evidence=text,
+            )
+        )
+    issues.extend(
+        _line_spacing_issues_for_paragraph(
+            paragraph,
+            location,
+            code="TABLE_CELL_SPACING",
+            expected_line_spacing_pt=_float_cfg(rules, "table", "cell_line_spacing_pt"),
+            rules=rules,
+        )
+    )
     return issues
 
 
@@ -1501,9 +2068,15 @@ def _check_page_numbering_static(document: DocumentInfo) -> list[Issue]:
     return issues
 
 
-def _check_reference_typography(document: DocumentInfo) -> list[Issue]:
+def _check_reference_typography(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     reference_started = False
+    heading_alignment = str(_cfg(rules, "reference", "heading_alignment"))
+    list_alignment = _alignment_allowed(_cfg(rules, "reference", "list_alignment"))
+    list_indent = _float_cfg(rules, "reference", "list_first_line_indent_chars")
+    list_space_before = _float_cfg(rules, "reference", "list_space_before_pt")
+    list_space_after = _float_cfg(rules, "reference", "list_space_after_pt")
+    list_line_spacing = _float_cfg(rules, "reference", "list_line_spacing_pt")
     for paragraph in document.paragraphs:
         text = paragraph.text.strip()
         if not text or _is_toc_paragraph(paragraph):
@@ -1512,14 +2085,14 @@ def _check_reference_typography(document: DocumentInfo) -> list[Issue]:
         if not reference_started:
             if _is_reference_heading(text):
                 reference_started = True
-                if paragraph.alignment is not None and paragraph.alignment != "center":
+                if paragraph.alignment is not None and paragraph.alignment != heading_alignment:
                     issues.append(
                         _issue(
                             "REFERENCE_HEADING_FORMAT",
                             Severity.WARNING,
-                            "References heading should be centered.",
+                            "References heading alignment should match the configured format.",
                             location=_paragraph_location(paragraph),
-                            expected="center",
+                            expected=heading_alignment,
                             actual=paragraph.alignment,
                             evidence=text,
                         )
@@ -1528,22 +2101,129 @@ def _check_reference_typography(document: DocumentInfo) -> list[Issue]:
                     _check_explicit_run_format(
                         paragraph,
                         code="REFERENCE_HEADING_FORMAT",
-                        expected_size_pt=18.0,
-                        expected_east_asia="黑体",
+                        expected_size_pt=_float_cfg(rules, "reference", "heading_size_pt"),
+                        expected_east_asia=str(_cfg(rules, "reference", "heading_east_asia")),
+                        rules=rules,
                     )
                 )
             continue
 
         if _is_heading_text(text) or normalized in {"致谢", "附录", "附录A", "附录B"}:
             break
+        if paragraph.alignment is not None and paragraph.alignment not in list_alignment:
+            issues.append(
+                _issue(
+                    "REFERENCE_LIST_FORMAT",
+                    Severity.WARNING,
+                    "Reference list entry alignment should match the configured format.",
+                    location=_paragraph_location(paragraph),
+                    expected="/".join(sorted(list_alignment)),
+                    actual=paragraph.alignment,
+                    evidence=text,
+                )
+            )
+        if paragraph.first_line_indent_chars is not None and abs(
+            paragraph.first_line_indent_chars - list_indent
+        ) > _float_cfg(rules, "tolerances", "indent_chars"):
+            issues.append(
+                _issue(
+                    "REFERENCE_LIST_FORMAT",
+                    Severity.WARNING,
+                    "Reference list entry should not use first-line indent.",
+                    location=_paragraph_location(paragraph),
+                    expected="no first-line indent",
+                    actual=f"{paragraph.first_line_indent_chars:g} characters",
+                    evidence=text,
+                )
+            )
+        if not _space_pt_match(paragraph.space_before_pt, list_space_before, rules):
+            issues.append(
+                _issue(
+                    "REFERENCE_LIST_SPACING",
+                    Severity.WARNING,
+                    "Reference list paragraph space before should match the template.",
+                    location=_paragraph_location(paragraph),
+                    expected=f"{list_space_before:g} pt",
+                    actual=_format_space_pt(paragraph.space_before_pt),
+                    evidence=text,
+                )
+            )
+        if not _space_pt_match(paragraph.space_after_pt, list_space_after, rules):
+            issues.append(
+                _issue(
+                    "REFERENCE_LIST_SPACING",
+                    Severity.WARNING,
+                    "Reference list paragraph space after should match the template.",
+                    location=_paragraph_location(paragraph),
+                    expected=f"{list_space_after:g} pt",
+                    actual=_format_space_pt(paragraph.space_after_pt),
+                    evidence=text,
+                )
+            )
+        if paragraph.line_spacing_multiple is not None or paragraph.line_spacing_pt is None:
+            actual = (
+                f"{paragraph.line_spacing_multiple:g}x ({paragraph.line_spacing_rule or 'auto'})"
+                if paragraph.line_spacing_multiple is not None
+                else "not explicit"
+            )
+            issues.append(
+                _issue(
+                    "REFERENCE_LIST_SPACING",
+                    Severity.WARNING,
+                    "Reference list line spacing should match the configured fixed-line format.",
+                    location=_paragraph_location(paragraph),
+                    expected=f"fixed {list_line_spacing:g} pt",
+                    actual=actual,
+                    evidence=text,
+                )
+            )
+        else:
+            issues.extend(
+                _line_spacing_issues_for_paragraph(
+                    paragraph,
+                    _paragraph_location(paragraph),
+                    code="REFERENCE_LIST_SPACING",
+                    expected_line_spacing_pt=list_line_spacing,
+                    rules=rules,
+                )
+            )
         issues.extend(
             _check_explicit_run_format(
                 paragraph,
                 code="REFERENCE_LIST_FORMAT",
-                expected_size_pt=10.5,
-                expected_east_asia="宋体",
+                expected_size_pt=_float_cfg(rules, "reference", "list_size_pt"),
+                expected_east_asia=str(_cfg(rules, "reference", "list_east_asia")),
+                expected_ascii=str(_cfg(rules, "reference", "list_ascii")),
+                rules=rules,
             )
         )
+        for run in _visible_runs(paragraph):
+            if run.bold is True:
+                issues.append(
+                    _issue(
+                        "REFERENCE_LIST_FORMAT",
+                        Severity.WARNING,
+                        "Reference list text should not be bold.",
+                        location=_paragraph_location(paragraph),
+                        expected="not bold",
+                        actual="bold",
+                        evidence=text,
+                    )
+                )
+                break
+            if run.italic is True:
+                issues.append(
+                    _issue(
+                        "REFERENCE_LIST_FORMAT",
+                        Severity.WARNING,
+                        "Reference list text should not be italic.",
+                        location=_paragraph_location(paragraph),
+                        expected="not italic",
+                        actual="italic",
+                        evidence=text,
+                    )
+                )
+                break
     return issues
 
 
@@ -1589,12 +2269,15 @@ def _check_empty_paragraphs(document: DocumentInfo) -> list[Issue]:
     return issues
 
 
-def _check_body_typography(document: DocumentInfo) -> list[Issue]:
+def _check_body_typography(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
+    expected_indent = _float_cfg(rules, "body", "first_line_indent_chars")
+    expected_space_before = _float_cfg(rules, "body", "space_before_pt")
+    expected_space_after = _float_cfg(rules, "body", "space_after_pt")
     for paragraph in document.paragraphs:
         if not _in_body_range(paragraph, document):
             continue
-        if not _looks_like_body_paragraph(paragraph):
+        if not _looks_like_body_paragraph(paragraph, rules):
             continue
         if _is_toc_paragraph(paragraph):
             continue
@@ -1604,22 +2287,46 @@ def _check_body_typography(document: DocumentInfo) -> list[Issue]:
                 _issue(
                     "BODY_INDENT",
                     Severity.WARNING,
-                    "Body paragraph first-line indent should be 2 characters.",
+                    "Body paragraph first-line indent should match the configured format.",
                     location=_paragraph_location(paragraph),
-                    expected="2 characters",
+                    expected=f"{expected_indent:g} characters",
                     actual="not explicit in paragraph/style metadata",
                     evidence=text,
                 )
             )
-        elif abs(paragraph.first_line_indent_chars - 2.0) > _INDENT_TOLERANCE_CHARS:
+        elif abs(paragraph.first_line_indent_chars - expected_indent) > _float_cfg(rules, "tolerances", "indent_chars"):
             issues.append(
                 _issue(
                     "BODY_INDENT",
                     Severity.WARNING,
-                    "Body paragraph first-line indent should be 2 characters.",
+                    "Body paragraph first-line indent should match the configured format.",
                     location=_paragraph_location(paragraph),
-                    expected="2 characters",
+                    expected=f"{expected_indent:g} characters",
                     actual=f"{paragraph.first_line_indent_chars:g} characters",
+                    evidence=text,
+                )
+            )
+        if not _space_pt_match(paragraph.space_before_pt, expected_space_before, rules):
+            issues.append(
+                _issue(
+                    "BODY_SPACING",
+                    Severity.WARNING,
+                    "Body paragraph space before should match the empty template.",
+                    location=_paragraph_location(paragraph),
+                    expected=f"{expected_space_before:g} pt",
+                    actual=_format_space_pt(paragraph.space_before_pt),
+                    evidence=text,
+                )
+            )
+        if not _space_pt_match(paragraph.space_after_pt, expected_space_after, rules):
+            issues.append(
+                _issue(
+                    "BODY_SPACING",
+                    Severity.WARNING,
+                    "Body paragraph space after should match the empty template.",
+                    location=_paragraph_location(paragraph),
+                    expected=f"{expected_space_after:g} pt",
+                    actual=_format_space_pt(paragraph.space_after_pt),
                     evidence=text,
                 )
             )
@@ -1627,16 +2334,44 @@ def _check_body_typography(document: DocumentInfo) -> list[Issue]:
             _check_explicit_run_format(
                 paragraph,
                 code="BODY_FONT",
-                expected_size_pt=12.0,
-                expected_east_asia="宋体",
-                expected_ascii="Times New Roman",
+                expected_size_pt=_float_cfg(rules, "body", "size_pt"),
+                expected_east_asia=str(_cfg(rules, "body", "east_asia")),
+                expected_ascii=str(_cfg(rules, "body", "ascii")),
+                rules=rules,
             )
         )
+        for run in _visible_runs(paragraph):
+            if run.bold is True:
+                issues.append(
+                    _issue(
+                        "BODY_FONT",
+                        Severity.WARNING,
+                        "Body text should not be bold in the empty template.",
+                        location=_paragraph_location(paragraph),
+                        expected="not bold",
+                        actual="bold",
+                        evidence=text,
+                    )
+                )
+                break
+            if run.italic is True:
+                issues.append(
+                    _issue(
+                        "BODY_FONT",
+                        Severity.WARNING,
+                        "Body text should not be italic in the empty template.",
+                        location=_paragraph_location(paragraph),
+                        expected="not italic",
+                        actual="italic",
+                        evidence=text,
+                    )
+                )
+                break
     return issues
 
 
 def _mixed_language_spacing_evidence(text: str) -> str:
-    match = _CJK_ASCII_ADJACENT_RE.search(text)
+    match = _CJK_ASCII_SPACED_RE.search(text)
     if not match:
         return text
     start = max(0, match.start() - 20)
@@ -1651,7 +2386,7 @@ def _mixed_language_check_start_index(document: DocumentInfo) -> int:
     return _first_body_paragraph_index(document)
 
 
-def _check_mixed_language_spacing(document: DocumentInfo) -> list[Issue]:
+def _check_mixed_language_spacing(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     reference_start = _reference_heading_index(document)
     thanks_start = _thanks_heading_index(document)
@@ -1670,30 +2405,36 @@ def _check_mixed_language_spacing(document: DocumentInfo) -> list[Issue]:
         text = paragraph.text.strip()
         if not text or text == "Abstract":
             continue
-        if _is_heading_paragraph(paragraph) or _is_caption_text(text):
+        if "签名" in text:
+            continue
+        if _keyword_line_parts(text, rules) is not None:
+            continue
+        if _is_heading_paragraph(paragraph) or _is_caption_text(text, rules):
             continue
         if re.search(r"https?://|www\.|[A-Za-z]:[/\\]", text):
             continue
-        if _CJK_ASCII_ADJACENT_RE.search(text):
+        if _CJK_ASCII_SPACED_RE.search(text):
             issues.append(
                 _issue(
                     "MIXED_LANGUAGE_SPACING",
-                    Severity.INFO,
-                    "Chinese text and adjacent English words/numbers should usually be separated by one half-width space.",
+                    Severity.WARNING,
+                    "Body text should not add spaces between Chinese text and adjacent English words or numbers.",
                     location=_paragraph_location(paragraph),
-                    expected="中文 English 中文",
-                    actual="Chinese/English adjacent without a space",
+                    expected="中文English中文 / 中文123中文",
+                    actual="space between Chinese and adjacent English/number text",
                     evidence=_mixed_language_spacing_evidence(text),
                 )
             )
     return issues
 
 
-def _check_thanks_format(document: DocumentInfo) -> list[Issue]:
+def _check_thanks_format(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     thanks_index = _thanks_heading_index(document)
     if thanks_index is None:
         return issues
+    heading_alignment = str(_cfg(rules, "thanks", "heading_alignment"))
+    body_indent = _float_cfg(rules, "thanks", "body_first_line_indent_chars")
     for paragraph in document.paragraphs:
         if paragraph.index < thanks_index:
             continue
@@ -1701,14 +2442,14 @@ def _check_thanks_format(document: DocumentInfo) -> list[Issue]:
         if not text:
             continue
         if paragraph.index == thanks_index:
-            if paragraph.alignment is not None and paragraph.alignment != "center":
+            if paragraph.alignment is not None and paragraph.alignment != heading_alignment:
                 issues.append(
                     _issue(
                         "THANKS_HEADING_FORMAT",
                         Severity.WARNING,
-                        "Acknowledgements heading should be centered.",
+                        "Acknowledgements heading alignment should match the configured format.",
                         location=_paragraph_location(paragraph),
-                        expected="center",
+                        expected=heading_alignment,
                         actual=paragraph.alignment,
                         evidence=text,
                     )
@@ -1717,22 +2458,23 @@ def _check_thanks_format(document: DocumentInfo) -> list[Issue]:
                 _check_explicit_run_format(
                     paragraph,
                     code="THANKS_HEADING_FORMAT",
-                    expected_size_pt=18.0,
-                    expected_east_asia="黑体",
+                    expected_size_pt=_float_cfg(rules, "thanks", "heading_size_pt"),
+                    expected_east_asia=str(_cfg(rules, "thanks", "heading_east_asia")),
+                    rules=rules,
                 )
             )
             continue
         if _is_heading_text(text):
             break
         if paragraph.first_line_indent_chars is not None:
-            if abs(paragraph.first_line_indent_chars - 2.0) > _INDENT_TOLERANCE_CHARS:
+            if abs(paragraph.first_line_indent_chars - body_indent) > _float_cfg(rules, "tolerances", "indent_chars"):
                 issues.append(
                     _issue(
                         "THANKS_BODY_FORMAT",
                         Severity.WARNING,
-                        "Acknowledgements body should use 2-character first-line indent.",
+                        "Acknowledgements body first-line indent should match the configured format.",
                         location=_paragraph_location(paragraph),
-                        expected="2 characters",
+                        expected=f"{body_indent:g} characters",
                         actual=f"{paragraph.first_line_indent_chars:g} characters",
                         evidence=text,
                     )
@@ -1741,52 +2483,45 @@ def _check_thanks_format(document: DocumentInfo) -> list[Issue]:
             _check_explicit_run_format(
                 paragraph,
                 code="THANKS_BODY_FORMAT",
-                expected_size_pt=12.0,
-                expected_east_asia="宋体",
+                expected_size_pt=_float_cfg(rules, "thanks", "body_size_pt"),
+                expected_east_asia=str(_cfg(rules, "thanks", "body_east_asia")),
+                rules=rules,
             )
         )
     return issues
 
 
-def _check_line_spacing(document: DocumentInfo) -> list[Issue]:
+def _check_line_spacing(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
     for paragraph in document.paragraphs:
-        if not _looks_like_line_spacing_target(paragraph, document):
+        if not _looks_like_line_spacing_target(paragraph, document, rules):
             continue
-        issues.extend(_line_spacing_issues_for_paragraph(paragraph, _paragraph_location(paragraph)))
-
-    first_body = _first_body_paragraph_index(document)
-    reference_start = _reference_heading_index(document)
-    reference_block = document.paragraphs[reference_start].block_index if reference_start is not None else None
-    for table in document.tables:
-        if table.block_index is None:
-            continue
-        if table.block_index < first_body:
-            continue
-        if reference_block is not None and table.block_index >= reference_block:
-            continue
-        for paragraph in table.paragraphs:
-            if not _looks_like_table_line_spacing_target(paragraph):
-                continue
-            issues.extend(
-                _line_spacing_issues_for_paragraph(
-                    paragraph,
-                    f"table {table.index} paragraph {paragraph.index}",
-                )
-            )
+        issues.extend(_line_spacing_issues_for_paragraph(paragraph, _paragraph_location(paragraph), rules=rules))
     return issues
 
 
-def _line_spacing_issues_for_paragraph(paragraph: ParagraphInfo, location: str) -> list[Issue]:
+def _line_spacing_issues_for_paragraph(
+    paragraph: ParagraphInfo,
+    location: str,
+    *,
+    code: str = "LINE_SPACING",
+    expected_line_spacing_pt: float | None = None,
+    rules: RuleSet | None = None,
+) -> list[Issue]:
     issues: list[Issue] = []
+    expected_line_spacing = (
+        expected_line_spacing_pt
+        if expected_line_spacing_pt is not None
+        else _float_cfg(rules, "body", "line_spacing_pt")
+    )
     if paragraph.line_spacing_multiple is not None:
         issues.append(
             _issue(
-                "LINE_SPACING",
+                code,
                 Severity.WARNING,
-                "Text paragraph line spacing should be fixed at 20 pt, not multiple/auto line spacing.",
+                "Text paragraph line spacing should match the configured fixed-line format, not multiple/auto line spacing.",
                 location=location,
-                expected="fixed 20 pt",
+                expected=f"fixed {expected_line_spacing:g} pt",
                 actual=f"{paragraph.line_spacing_multiple:g}x ({paragraph.line_spacing_rule or 'auto'})",
                 evidence=paragraph.text.strip(),
             )
@@ -1797,25 +2532,25 @@ def _line_spacing_issues_for_paragraph(paragraph: ParagraphInfo, location: str) 
     if paragraph.line_spacing_rule not in {None, "exact", "fixed"}:
         issues.append(
             _issue(
-                "LINE_SPACING",
+                code,
                 Severity.WARNING,
-                "Text paragraph line spacing should be fixed at 20 pt.",
+                "Text paragraph line spacing should match the configured fixed-line format.",
                 location=location,
-                expected="fixed 20 pt",
+                expected=f"fixed {expected_line_spacing:g} pt",
                 actual=f"{paragraph.line_spacing_pt:.1f} pt ({paragraph.line_spacing_rule})",
                 evidence=paragraph.text.strip(),
             )
         )
         return issues
-    if abs(paragraph.line_spacing_pt - 20.0) <= _LINE_SPACING_TOLERANCE_PT:
+    if abs(paragraph.line_spacing_pt - expected_line_spacing) <= _float_cfg(rules, "tolerances", "line_spacing_pt"):
         return issues
     issues.append(
         _issue(
-            "LINE_SPACING",
+            code,
             Severity.WARNING,
-            "Text paragraph line spacing should be fixed at 20 pt.",
+            "Text paragraph line spacing should match the configured fixed-line format.",
             location=location,
-            expected="20 pt",
+            expected=f"{expected_line_spacing:g} pt",
             actual=f"{paragraph.line_spacing_pt:.1f} pt",
         )
     )
@@ -1825,30 +2560,32 @@ def _line_spacing_issues_for_paragraph(paragraph: ParagraphInfo, location: str) 
 def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
     """Run all supported checks."""
     issues: list[Issue] = []
-    issues.extend(_check_structure_presence(document))
+    issues.extend(_check_structure_presence(document, rules))
     issues.extend(_check_page_settings(document, rules))
     issues.extend(_check_header_text(document, rules))
     issues.extend(_check_static_headers_and_page_numbers(document, rules))
-    issues.extend(_check_major_heading_spacing(document))
-    issues.extend(_check_abstract_format(document))
-    issues.extend(_check_headings(document))
-    issues.extend(_check_heading_script_fonts(document))
+    issues.extend(_check_major_heading_spacing(document, rules))
+    issues.extend(_check_abstract_format(document, rules))
+    issues.extend(_check_headings(document, rules))
+    issues.extend(_check_heading_script_fonts(document, rules))
     for paragraph in document.paragraphs:
-        issues.extend(_check_numbering(paragraph))
-    issues.extend(_check_keywords(document))
+        issues.extend(_check_numbering(paragraph, rules))
+    issues.extend(_check_keywords(document, rules))
     issues.extend(_check_references(document))
+    issues.extend(_check_reference_citations(document, rules))
     issues.extend(_check_toc_fields(document))
-    issues.extend(_check_table_borders(document))
-    issues.extend(_check_captions(document))
-    issues.extend(_check_caption_object_order(document))
-    issues.extend(_check_continued_table_layout(document))
+    issues.extend(_check_table_borders(document, rules))
+    issues.extend(_check_captions(document, rules))
+    issues.extend(_check_caption_object_order(document, rules))
+    issues.extend(_check_continued_table_layout(document, rules))
     issues.extend(_check_page_numbering_static(document))
-    issues.extend(_check_reference_typography(document))
+    issues.extend(_check_reference_typography(document, rules))
     issues.extend(_check_empty_paragraphs(document))
-    issues.extend(_check_body_typography(document))
-    issues.extend(_check_table_cell_typography(document))
-    issues.extend(_check_thanks_format(document))
-    issues.extend(_check_line_spacing(document))
+    issues.extend(_check_body_typography(document, rules))
+    issues.extend(_check_mixed_language_spacing(document, rules))
+    issues.extend(_check_table_cell_typography(document, rules))
+    issues.extend(_check_thanks_format(document, rules))
+    issues.extend(_check_line_spacing(document, rules))
     return CheckResult(
         issues=tuple(issues),
         checked_items=(
@@ -1869,13 +2606,19 @@ def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
             "HEADING_PUNCTUATION",
             "HEADING_FORMAT",
             "HEADING_SCRIPT_FONT",
+            "HEADING_SPACING",
             "FIGURE_NUMBERING",
             "TABLE_NUMBERING",
             "EQUATION_NUMBERING",
+            "KEYWORD_LABEL_FORMAT",
             "KEYWORD_SEPARATOR",
             "KEYWORD_TERMINATOR",
             "KEYWORD_COUNT",
             "REFERENCE_FORMAT",
+            "REFERENCE_CITATION_FORMAT",
+            "REFERENCE_CITATION_FIELD",
+            "REFERENCE_CITATION_SEPARATOR",
+            "REFERENCE_CITATION_TARGET",
             "TOC_FIELD",
             "TABLE_BORDER",
             "TABLE_THREE_LINE",
@@ -1884,6 +2627,8 @@ def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
             "TABLE_HEADER_BORDER",
             "TABLE_WIDTH",
             "TABLE_ALIGNMENT",
+            "TABLE_CELL_WIDTH",
+            "TABLE_CELL_ALIGNMENT",
             "CAPTION_SEPARATOR",
             "CAPTION_FORMAT",
             "CAPTION_LINE_SPACING",
@@ -1893,11 +2638,15 @@ def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
             "PAGE_NUMBERING_STATIC",
             "REFERENCE_HEADING_FORMAT",
             "REFERENCE_LIST_FORMAT",
+            "REFERENCE_LIST_SPACING",
             "EMPTY_PARAGRAPHS",
             "BODY_INDENT",
+            "BODY_SPACING",
             "BODY_FONT",
+            "MIXED_LANGUAGE_SPACING",
             "TABLE_CELL_FORMAT",
             "TABLE_CELL_FONT",
+            "TABLE_CELL_SPACING",
             "THANKS_HEADING_FORMAT",
             "THANKS_BODY_FORMAT",
             "LINE_SPACING",

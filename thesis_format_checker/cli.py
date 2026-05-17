@@ -72,10 +72,9 @@ def _print_summary(output_path: Path, result, json_summary: bool) -> None:
     counts = _severity_counts(result)
     summary = {
         "output_path": str(output_path),
-        "error": counts[Severity.ERROR.value],
         "warning": counts[Severity.WARNING.value],
         "info": counts[Severity.INFO.value],
-        "total": sum(counts.values()),
+        "total": counts[Severity.WARNING.value] + counts[Severity.INFO.value],
         "checked_items": len(result.checked_items),
         "unsupported_items": len(result.unsupported_items),
     }
@@ -85,7 +84,7 @@ def _print_summary(output_path: Path, result, json_summary: bool) -> None:
     print(
         "Report written to "
         f"{summary['output_path']} "
-        f"(error={summary['error']}, warning={summary['warning']}, info={summary['info']}, "
+        f"(warning={summary['warning']}, info={summary['info']}, "
         f"total={summary['total']})"
     )
 
@@ -154,7 +153,7 @@ def _add_rendered_pdf_missing_notice(result: CheckResult, rules) -> CheckResult:
 
     notice = Issue(
         code="RENDERED_HEADER_CHECK_SKIPPED",
-        severity=Severity.WARNING,
+        severity=Severity.INFO,
         message=(
             "Rendered page header check was not run; provide --rendered-pdf to verify "
             "body-page headers and page numbers after Word/WPS pagination."

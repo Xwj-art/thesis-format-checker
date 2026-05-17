@@ -18,6 +18,7 @@ def build_minimal_docx(
     path: str | Path,
     *,
     body_text: str = "Thesis body paragraph.",
+    body_runs_xml: str | None = None,
     header_text: str = "Thesis header",
     footer_text: str = "Thesis footer",
     paragraph_properties_xml: str = "",
@@ -30,12 +31,9 @@ def build_minimal_docx(
     """Create a small but structurally valid DOCX package for tests."""
     docx_path = Path(path)
     docx_path.parent.mkdir(parents=True, exist_ok=True)
-
-    document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <w:body>
-    <w:p>
-      {paragraph_properties_xml}
+    body_runs = body_runs_xml
+    if body_runs is None:
+        body_runs = f"""
       <w:r>
         <w:rPr>
           <w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/>
@@ -44,6 +42,14 @@ def build_minimal_docx(
         </w:rPr>
         <w:t>{_xml_escape(body_text)}</w:t>
       </w:r>
+"""
+
+    document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p>
+      {paragraph_properties_xml}
+      {body_runs}
     </w:p>
     <w:tbl>
       {table_properties_xml}

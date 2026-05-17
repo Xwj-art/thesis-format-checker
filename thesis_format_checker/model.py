@@ -19,6 +19,8 @@ class RunInfo:
     font_east_asia: str | None = None
     size_pt: float | None = None
     bold: bool | None = None
+    italic: bool | None = None
+    vertical_align: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,8 @@ class ParagraphInfo:
     first_line_indent_chars: float | None = None
     space_before_pt: float | None = None
     space_after_pt: float | None = None
+    space_before_lines: float | None = None
+    space_after_lines: float | None = None
     has_page_break_before: bool = False
     has_page_break: bool = False
     has_drawing: bool = False
@@ -74,6 +78,9 @@ class TableInfo:
     horizontal_line_count: int | None = None
     horizontal_line_positions: tuple[str, ...] = ()
     header_bottom_border_sizes: tuple[int, ...] = ()
+    cell_width_types: tuple[tuple[str | None, ...], ...] = ()
+    cell_width_values: tuple[tuple[int | None, ...], ...] = ()
+    cell_vertical_alignments: tuple[str | None, ...] = ()
     has_vertical_borders: bool | None = None
     alignment: str | None = None
     width_type: str | None = None
@@ -99,6 +106,7 @@ class DocumentInfo:
 class RuleSet:
     source_path: Path
     raw_markdown: str
+    config: dict[str, Any] = field(default_factory=dict)
     expected_header_text: str | None = None
     expected_page: dict[str, float] = field(default_factory=dict)
     manual_review_items: tuple[str, ...] = ()

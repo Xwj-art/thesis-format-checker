@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 import unittest
 
 from thesis_format_checker.checks import (
@@ -9,15 +10,20 @@ from thesis_format_checker.checks import (
     _check_caption_object_order,
     _check_continued_table_layout,
     _check_header_text,
+    _check_headings,
     _check_heading_script_fonts,
+    _check_keywords,
     _check_major_heading_spacing,
     _check_mixed_language_spacing,
     _check_numbering,
+    _check_reference_citations,
+    _check_reference_typography,
     _check_static_headers_and_page_numbers,
     _check_table_borders,
     _check_table_cell_typography,
 )
 from thesis_format_checker.model import DocumentInfo, ParagraphInfo, RuleSet, RunInfo, SectionInfo, Severity, TableInfo
+from thesis_format_checker.rules import load_rules
 
 
 class ChecksTests(unittest.TestCase):
@@ -178,8 +184,43 @@ class ChecksTests(unittest.TestCase):
 
         self.assertTrue(any(issue.code == "CAPTION_FORMAT" for issue in issues))
 
-    def test_mixed_language_spacing_helper_flags_adjacent_chinese_and_english(self) -> None:
-        paragraph = ParagraphInfo(index=1, text="本文基于Spring AI实现智能客服。")
+    def test_caption_format_checks_number_part_as_songti(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="图2-1 系统架构图",
+            alignment="center",
+            line_spacing_pt=20.0,
+            line_spacing_rule="exact",
+            runs=(
+                RunInfo(text="图", font_east_asia="宋体", font_ascii="宋体", size_pt=12.0),
+                RunInfo(text="2-1", font_ascii="Times New Roman", font_east_asia="宋体", size_pt=12.0),
+                RunInfo(text=" 系统架构图", font_east_asia="宋体", font_ascii="宋体", size_pt=12.0),
+            ),
+        )
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_captions(document)
+
+        self.assertTrue(any(issue.code == "CAPTION_FORMAT" for issue in issues))
+
+    def test_caption_format_rejects_first_line_indent(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="表2-1 实验结果",
+            alignment="center",
+            first_line_indent_chars=2.0,
+            line_spacing_pt=20.0,
+            line_spacing_rule="exact",
+            runs=(RunInfo(text="表2-1 实验结果", font_east_asia="宋体", font_ascii="宋体", size_pt=12.0),),
+        )
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_captions(document)
+
+        self.assertTrue(any(issue.code == "CAPTION_FORMAT" and "indent" in issue.message for issue in issues))
+
+    def test_mixed_language_spacing_flags_spaces_in_body_text(self) -> None:
+        paragraph = ParagraphInfo(index=1, text="本文基于 Spring AI 实现智能客服。")
         document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
 
         issues = _check_mixed_language_spacing(document)
@@ -187,8 +228,16 @@ class ChecksTests(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0].code, "MIXED_LANGUAGE_SPACING")
 
-    def test_mixed_language_spacing_accepts_half_width_spaces(self) -> None:
-        paragraph = ParagraphInfo(index=1, text="本文基于 Spring AI 实现智能客服。")
+    def test_mixed_language_spacing_accepts_natural_adjacent_text(self) -> None:
+        paragraph = ParagraphInfo(index=1, text="本文基于Spring AI实现智能客服。")
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_mixed_language_spacing(document)
+
+        self.assertEqual(issues, [])
+
+    def test_mixed_language_spacing_ignores_headings(self) -> None:
+        paragraph = ParagraphInfo(index=1, text="1.1 Spring AI研究背景")
         document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
 
         issues = _check_mixed_language_spacing(document)
@@ -232,6 +281,169 @@ class ChecksTests(unittest.TestCase):
         issues = _check_numbering(paragraph)
 
         self.assertTrue(any(issue.code == "EQUATION_NUMBERING" for issue in issues))
+
+    def test_keywords_flag_english_label_colon_and_space_format(self) -> None:
+        paragraph = ParagraphInfo(index=1, text="Key Words : Spring AI；RAG；商城")
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_keywords(document)
+
+        self.assertTrue(any(issue.code == "KEYWORD_LABEL_FORMAT" for issue in issues))
+
+    def test_keywords_accept_configured_english_label_with_chinese_colon(self) -> None:
+        paragraph = ParagraphInfo(index=1, text="Key Words：Spring AI；RAG；商城")
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_keywords(document)
+
+        self.assertFalse(any(issue.code == "KEYWORD_LABEL_FORMAT" for issue in issues))
+
+    def test_reference_citations_accept_superscript_cross_reference(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="相关研究见[1]。",
+            field_instructions=("REF _Ref123456 \\r \\h",),
+            runs=(
+                RunInfo(text="相关研究见"),
+                RunInfo(text="[1]", vertical_align="superscript"),
+                RunInfo(text="。"),
+            ),
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(
+                ParagraphInfo(index=0, text="第1章 绪论"),
+                paragraph,
+                ParagraphInfo(index=2, text="参考文献"),
+                ParagraphInfo(index=3, text="[1] 作者. 题名[J]. 期刊,2024,1(1):1-2."),
+            ),
+        )
+
+        issues = _check_reference_citations(document)
+
+        self.assertEqual(issues, [])
+
+    def test_reference_citations_flag_plain_text_not_superscript_or_field(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="相关研究见[1]。",
+            runs=(RunInfo(text="相关研究见[1]。"),),
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(
+                ParagraphInfo(index=0, text="第1章 绪论"),
+                paragraph,
+                ParagraphInfo(index=2, text="参考文献"),
+                ParagraphInfo(index=3, text="[1] 作者. 题名[J]. 期刊,2024,1(1):1-2."),
+            ),
+        )
+
+        issues = _check_reference_citations(document)
+        codes = {issue.code for issue in issues}
+
+        self.assertIn("REFERENCE_CITATION_FORMAT", codes)
+        self.assertIn("REFERENCE_CITATION_FIELD", codes)
+
+    def test_reference_citations_flag_ascii_comma_inside_superscript(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="相关研究见[1,2]。",
+            field_instructions=("REF _Ref123456 \\r \\h",),
+            runs=(
+                RunInfo(text="相关研究见"),
+                RunInfo(text="[1,2]", vertical_align="superscript"),
+                RunInfo(text="。"),
+            ),
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(
+                ParagraphInfo(index=0, text="第1章 绪论"),
+                paragraph,
+                ParagraphInfo(index=2, text="参考文献"),
+                ParagraphInfo(index=3, text="[1] 作者. 题名[J]. 期刊,2024,1(1):1-2."),
+                ParagraphInfo(index=4, text="[2] 作者. 题名[J]. 期刊,2024,1(1):1-2."),
+            ),
+        )
+
+        issues = _check_reference_citations(document)
+
+        self.assertTrue(any(issue.code == "REFERENCE_CITATION_SEPARATOR" for issue in issues))
+
+    def test_reference_citations_accept_chinese_comma_inside_superscript(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="相关研究见[1，2]。",
+            field_instructions=("REF _Ref123456 \\r \\h",),
+            runs=(
+                RunInfo(text="相关研究见"),
+                RunInfo(text="[1，2]", vertical_align="superscript"),
+                RunInfo(text="。"),
+            ),
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(
+                ParagraphInfo(index=0, text="第1章 绪论"),
+                paragraph,
+                ParagraphInfo(index=2, text="参考文献"),
+                ParagraphInfo(index=3, text="[1] 作者. 题名[J]. 期刊,2024,1(1):1-2."),
+                ParagraphInfo(index=4, text="[2] 作者. 题名[J]. 期刊,2024,1(1):1-2."),
+            ),
+        )
+
+        issues = _check_reference_citations(document)
+
+        self.assertFalse(any(issue.code == "REFERENCE_CITATION_SEPARATOR" for issue in issues))
+
+    def test_reference_citations_flag_uncited_reference_entry(self) -> None:
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(
+                ParagraphInfo(index=0, text="第1章 绪论"),
+                ParagraphInfo(index=1, text="正文没有引用。"),
+                ParagraphInfo(index=2, text="参考文献"),
+                ParagraphInfo(index=3, text="[1] 作者. 题名[J]. 期刊,2024,1(1):1-2."),
+            ),
+        )
+
+        issues = _check_reference_citations(document)
+
+        self.assertTrue(
+            any(issue.code == "REFERENCE_CITATION_TARGET" and issue.severity is Severity.INFO for issue in issues)
+        )
+
+    def test_reference_typography_checks_list_spacing_and_font(self) -> None:
+        entry = ParagraphInfo(
+            index=2,
+            text="ALANAZI S S. Question answering systems[J]. Journal, 2021, 12(3): 495-502.",
+            alignment="center",
+            first_line_indent_chars=2.0,
+            space_before_pt=3.0,
+            space_after_pt=6.0,
+            line_spacing_multiple=1.5,
+            line_spacing_rule="auto",
+            runs=(
+                RunInfo(
+                    text="ALANAZI S S. Question answering systems[J]. Journal, 2021, 12(3): 495-502.",
+                    font_ascii="Times New Roman",
+                    font_east_asia="宋体",
+                    size_pt=12.0,
+                    bold=True,
+                ),
+            ),
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=1, text="参考文献", alignment="center"), entry),
+        )
+
+        issues = _check_reference_typography(document)
+        codes = [issue.code for issue in issues]
+
+        self.assertIn("REFERENCE_LIST_FORMAT", codes)
+        self.assertIn("REFERENCE_LIST_SPACING", codes)
 
     def test_table_caption_position_ignores_body_references(self) -> None:
         paragraph = ParagraphInfo(index=2, block_index=2, text="表6-4进一步说明，不同检索方案的差异并不只来自总体指标。")
@@ -312,8 +524,8 @@ class ChecksTests(unittest.TestCase):
             index=1,
             text="4.9 RAG实现",
             runs=(
-                RunInfo(text="4.9 RAG", font_ascii="Times New Roman", font_east_asia="SimHei", size_pt=16.0),
-                RunInfo(text="实现", font_ascii="Times New Roman", font_east_asia="SimHei", size_pt=16.0),
+                RunInfo(text="4.9 RAG", font_ascii="SimHei", font_east_asia="SimHei", size_pt=16.0),
+                RunInfo(text="实现", font_ascii="SimHei", font_east_asia="SimHei", size_pt=16.0),
             ),
         )
         document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
@@ -321,6 +533,109 @@ class ChecksTests(unittest.TestCase):
         issues = _check_heading_script_fonts(document)
 
         self.assertEqual(issues, [])
+
+    def test_heading_script_font_rejects_times_new_roman_numbers(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="3.1 数值模型",
+            runs=(RunInfo(text="3.1 数值模型", font_ascii="Times New Roman", font_east_asia="黑体", size_pt=16.0),),
+        )
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_heading_script_fonts(document)
+
+        self.assertTrue(any(issue.code == "HEADING_SCRIPT_FONT" for issue in issues))
+
+    def test_section_heading_script_font_rejects_explicit_bold(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="3.1 数值模型",
+            runs=(RunInfo(text="3.1 数值模型", font_ascii="黑体", font_east_asia="黑体", size_pt=16.0, bold=True),),
+        )
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_heading_script_fonts(document)
+
+        self.assertTrue(any(issue.code == "HEADING_SCRIPT_FONT" and issue.actual == "bold" for issue in issues))
+
+    def test_chapter_heading_script_font_requires_bold(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="第1章 绪论",
+            runs=(RunInfo(text="第1章 绪论", font_ascii="黑体", font_east_asia="黑体", size_pt=18.0, bold=False),),
+        )
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_heading_script_fonts(document)
+
+        self.assertTrue(any(issue.code == "HEADING_SCRIPT_FONT" and issue.expected == "bold" for issue in issues))
+
+    def test_chapter_heading_script_font_accepts_template_bold(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="第1章 绪论",
+            runs=(RunInfo(text="第1章 绪论", font_ascii="黑体", font_east_asia="黑体", size_pt=18.0, bold=True),),
+        )
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_heading_script_fonts(document)
+
+        self.assertEqual(issues, [])
+
+    def test_heading_spacing_checks_template_before_after_and_line_spacing(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="1.1 研究背景",
+            alignment="left",
+            space_before_lines=1.0,
+            space_after_lines=0.0,
+            line_spacing_multiple=1.0,
+            line_spacing_rule="auto",
+            runs=(RunInfo(text="1.1 研究背景", font_east_asia="黑体", size_pt=16.0),),
+        )
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_headings(document)
+
+        codes = [issue.code for issue in issues]
+        self.assertGreaterEqual(codes.count("HEADING_SPACING"), 3)
+
+    def test_chapter_heading_line_spacing_uses_chapter_template_expectation(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="第1章 绪论",
+            alignment="center",
+            space_before_lines=0.5,
+            space_after_lines=0.5,
+            line_spacing_multiple=2.0,
+            line_spacing_rule="auto",
+            runs=(RunInfo(text="第1章 绪论", font_ascii="黑体", font_east_asia="黑体", size_pt=18.0, bold=True),),
+        )
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_headings(document)
+
+        self.assertTrue(
+            any(issue.code == "HEADING_SPACING" and "no explicit override" in (issue.expected or "") for issue in issues)
+        )
+
+    def test_section_heading_checks_missing_line_spacing_and_indent(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="3.1 数值模型",
+            alignment="left",
+            space_before_lines=0.5,
+            space_after_lines=0.5,
+            first_line_indent_chars=2.0,
+            runs=(RunInfo(text="3.1 数值模型", font_ascii="黑体", font_east_asia="黑体", size_pt=16.0),),
+        )
+        document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(paragraph,))
+
+        issues = _check_headings(document)
+        codes = [issue.code for issue in issues]
+
+        self.assertIn("HEADING_SPACING", codes)
+        self.assertIn("HEADING_FORMAT", codes)
 
     def test_heading_script_font_uses_word_heading_style_name(self) -> None:
         paragraph = ParagraphInfo(
@@ -360,6 +675,34 @@ class ChecksTests(unittest.TestCase):
         self.assertIn("BODY_INDENT", codes)
         self.assertIn("BODY_FONT", codes)
 
+    def test_body_typography_uses_indent_loaded_from_markdown_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{"body": {"first_line_indent_chars": 3.0}}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            paragraph = ParagraphInfo(
+                index=1,
+                text="本文使用Spring AI实现客服系统。",
+                first_line_indent_chars=2.0,
+                runs=(RunInfo(text="本文使用Spring AI实现客服系统。", font_east_asia="宋体", size_pt=12.0),),
+            )
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(ParagraphInfo(index=0, text="第1章 绪论"), paragraph),
+            )
+
+            issues = _check_body_typography(document, rules)
+
+            self.assertTrue(any(issue.code == "BODY_INDENT" and issue.expected == "3 characters" for issue in issues))
+
     def test_body_typography_flags_missing_first_line_indent(self) -> None:
         paragraph = ParagraphInfo(
             index=1,
@@ -376,6 +719,35 @@ class ChecksTests(unittest.TestCase):
 
         self.assertTrue(any(issue.code == "BODY_INDENT" for issue in issues))
 
+    def test_body_typography_checks_spacing_bold_and_italic(self) -> None:
+        paragraph = ParagraphInfo(
+            index=1,
+            text="本文进一步说明模型训练过程。",
+            first_line_indent_chars=2.0,
+            space_before_pt=6.0,
+            space_after_pt=0.0,
+            runs=(
+                RunInfo(
+                    text="本文进一步说明模型训练过程。",
+                    font_ascii="Times New Roman",
+                    font_east_asia="宋体",
+                    size_pt=12.0,
+                    bold=True,
+                    italic=True,
+                ),
+            ),
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=0, text="第1章 绪论"), paragraph),
+        )
+
+        issues = _check_body_typography(document)
+        codes = [issue.code for issue in issues]
+
+        self.assertIn("BODY_SPACING", codes)
+        self.assertIn("BODY_FONT", codes)
+
     def test_table_cell_typography_checks_font_size(self) -> None:
         table_paragraph = ParagraphInfo(
             index=1,
@@ -390,8 +762,34 @@ class ChecksTests(unittest.TestCase):
 
         issues = _check_table_cell_typography(document)
 
-        self.assertEqual(len(issues), 1)
-        self.assertEqual(issues[0].code, "TABLE_CELL_FORMAT")
+        self.assertTrue(any(issue.code == "TABLE_CELL_FORMAT" for issue in issues))
+
+    def test_table_cell_typography_checks_paragraph_spacing_triplet(self) -> None:
+        table_paragraph = ParagraphInfo(
+            index=1,
+            text="商品名称",
+            space_before_pt=6.0,
+            space_after_pt=3.0,
+            line_spacing_multiple=1.5,
+            line_spacing_rule="auto",
+            runs=(RunInfo(text="商品名称", font_ascii="Times New Roman", font_east_asia="宋体", size_pt=12.0),),
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=0, block_index=0, text="第1章 绪论"),),
+            tables=(
+                TableInfo(
+                    index=1,
+                    block_index=1,
+                    rows=(("字段", "说明"), ("name", "商品名称")),
+                    paragraphs=(table_paragraph,),
+                ),
+            ),
+        )
+
+        issues = _check_table_cell_typography(document)
+
+        self.assertGreaterEqual([issue.code for issue in issues].count("TABLE_CELL_SPACING"), 3)
 
     def test_table_border_check_flags_visible_vertical_borders(self) -> None:
         document = DocumentInfo(
@@ -447,6 +845,9 @@ class ChecksTests(unittest.TestCase):
                     horizontal_line_count=3,
                     horizontal_line_positions=("top", "after row 1", "bottom"),
                     header_bottom_border_sizes=(6, 6),
+                    cell_width_types=(("pct", "pct"), ("pct", "pct")),
+                    cell_width_values=((2500, 2500), (2500, 2500)),
+                    cell_vertical_alignments=("center", "center", "center", "center"),
                     has_vertical_borders=False,
                     alignment="center",
                     width_type="pct",
@@ -473,6 +874,9 @@ class ChecksTests(unittest.TestCase):
                     horizontal_line_count=4,
                     horizontal_line_positions=("top", "after row 1", "after row 2", "bottom"),
                     header_bottom_border_sizes=(6, 6),
+                    cell_width_types=(("pct", "pct"), ("pct", "pct"), ("pct", "pct")),
+                    cell_width_values=((2500, 2500), (2500, 2500), (2500, 2500)),
+                    cell_vertical_alignments=("center", "center", "center", "center", "center", "center"),
                     has_vertical_borders=False,
                     alignment="center",
                     width_type="pct",
@@ -497,6 +901,9 @@ class ChecksTests(unittest.TestCase):
                     border_values=("top=single", "bottom=single", "insideH=none", "insideV=none"),
                     border_sizes=("top=12", "bottom=18"),
                     header_bottom_border_sizes=(4, 6),
+                    cell_width_types=(("dxa", "pct"), ("pct", "pct")),
+                    cell_width_values=((2400, 2500), (3000, 1000)),
+                    cell_vertical_alignments=("top", "center", None, "center"),
                     has_vertical_borders=False,
                     alignment="left",
                     width_type="dxa",
@@ -511,7 +918,9 @@ class ChecksTests(unittest.TestCase):
         self.assertIn("TABLE_ALIGNMENT", codes)
         self.assertIn("TABLE_BORDER_WIDTH", codes)
         self.assertIn("TABLE_HEADER_BORDER", codes)
-        self.assertTrue(any(issue.code == "TABLE_WIDTH" and issue.severity is Severity.INFO for issue in issues))
+        self.assertIn("TABLE_WIDTH", codes)
+        self.assertIn("TABLE_CELL_WIDTH", codes)
+        self.assertIn("TABLE_CELL_ALIGNMENT", codes)
 
     def test_table_border_check_ignores_single_row_layout_tables(self) -> None:
         document = DocumentInfo(

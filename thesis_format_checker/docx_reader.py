@@ -233,10 +233,16 @@ def _paragraph_props(p_pr: ET.Element | None) -> dict[str, Any]:
             props["line_spacing_rule"] = line_rule
         before = _attr_int(spacing, "before")
         after = _attr_int(spacing, "after")
+        before_lines = _attr_int(spacing, "beforeLines")
+        after_lines = _attr_int(spacing, "afterLines")
         if before is not None:
             props["space_before_pt"] = _twips_to_pt(before)
         if after is not None:
             props["space_after_pt"] = _twips_to_pt(after)
+        if before_lines is not None:
+            props["space_before_lines"] = before_lines / 100.0
+        if after_lines is not None:
+            props["space_after_lines"] = after_lines / 100.0
     ind = p_pr.find("w:ind", NS)
     if ind is not None:
         props["first_line_indent_chars"] = _first_line_indent_chars(ind, None)
@@ -255,6 +261,8 @@ def _run_props(r_pr: ET.Element | None) -> dict[str, Any]:
         "font_east_asia": _font_name(r_pr, "eastAsia"),
         "size_pt": _font_size_pt(r_pr),
         "bold": _bool_prop(r_pr.find("w:b", NS)),
+        "italic": _bool_prop(r_pr.find("w:i", NS)),
+        "vertical_align": _attr_val(r_pr.find("w:vertAlign", NS), "val"),
     }
 
 
@@ -324,6 +332,12 @@ def _parse_paragraph(
     space_after_pt = direct_p_props.get("space_after_pt")
     if space_after_pt is None:
         space_after_pt = style_props.get("space_after_pt")
+    space_before_lines = direct_p_props.get("space_before_lines")
+    if space_before_lines is None:
+        space_before_lines = style_props.get("space_before_lines")
+    space_after_lines = direct_p_props.get("space_after_lines")
+    if space_after_lines is None:
+        space_after_lines = style_props.get("space_after_lines")
     has_page_break_before = False
     has_page_break = False
 
@@ -337,7 +351,7 @@ def _parse_paragraph(
         has_page_break_before = page_break_before is not None and _is_on(page_break_before)
 
     runs: list[RunInfo] = []
-    for run in element.findall("w:r", NS):
+    for run in element.findall(".//w:r", NS):
         if run.find("w:br", NS) is not None:
             for br in run.findall("w:br", NS):
                 if _attr_val(br, "type") == "page":
@@ -354,6 +368,16 @@ def _parse_paragraph(
                 font_east_asia=direct_r_props.get("font_east_asia") or style_props.get("font_east_asia"),
                 size_pt=direct_r_props.get("size_pt") or style_props.get("size_pt"),
                 bold=direct_r_props.get("bold") if direct_r_props.get("bold") is not None else style_props.get("bold"),
+                italic=(
+                    direct_r_props.get("italic")
+                    if direct_r_props.get("italic") is not None
+                    else style_props.get("italic")
+                ),
+                vertical_align=(
+                    direct_r_props.get("vertical_align")
+                    if direct_r_props.get("vertical_align") is not None
+                    else style_props.get("vertical_align")
+                ),
             )
         )
 
@@ -371,6 +395,8 @@ def _parse_paragraph(
         first_line_indent_chars=first_line_indent_chars,
         space_before_pt=space_before_pt,
         space_after_pt=space_after_pt,
+        space_before_lines=space_before_lines,
+        space_after_lines=space_after_lines,
         has_page_break_before=has_page_break_before,
         has_page_break=has_page_break,
         has_drawing=element.find(".//w:drawing", NS) is not None or element.find(".//w:pict", NS) is not None,
@@ -440,13 +466,26 @@ def _parse_section(
 def _parse_table(element: ET.Element, index: int, block_index: int, style_data: dict[str, Any]) -> TableInfo:
     rows: list[tuple[str, ...]] = []
     paragraphs: list[ParagraphInfo] = []
+    cell_width_types: list[tuple[str | None, ...]] = []
+    cell_width_values: list[tuple[int | None, ...]] = []
+    cell_vertical_alignments: list[str | None] = []
     for row in element.findall("w:tr", NS):
         cells: list[str] = []
+        row_width_types: list[str | None] = []
+        row_width_values: list[int | None] = []
         for cell in row.findall("w:tc", NS):
+            tc_pr = cell.find("w:tcPr", NS)
+            tc_w = tc_pr.find("w:tcW", NS) if tc_pr is not None else None
+            v_align = tc_pr.find("w:vAlign", NS) if tc_pr is not None else None
+            row_width_types.append(_attr_val(tc_w, "type"))
+            row_width_values.append(_attr_int(tc_w, "w"))
+            cell_vertical_alignments.append(_attr_val(v_align, "val"))
             cells.append(_collect_cell_text(cell))
             for paragraph in cell.iter(_qn("w:p")):
                 paragraphs.append(_parse_paragraph(paragraph, len(paragraphs), block_index, style_data))
         rows.append(tuple(cells))
+        cell_width_types.append(tuple(row_width_types))
+        cell_width_values.append(tuple(row_width_values))
     tbl_pr = element.find("w:tblPr", NS)
     tbl_w = tbl_pr.find("w:tblW", NS) if tbl_pr is not None else None
     tbl_jc = tbl_pr.find("w:jc", NS) if tbl_pr is not None else None
@@ -467,6 +506,9 @@ def _parse_table(element: ET.Element, index: int, block_index: int, style_data: 
         horizontal_line_count=len(horizontal_line_positions),
         horizontal_line_positions=tuple(horizontal_line_positions),
         header_bottom_border_sizes=tuple(header_bottom_sizes),
+        cell_width_types=tuple(cell_width_types),
+        cell_width_values=tuple(cell_width_values),
+        cell_vertical_alignments=tuple(cell_vertical_alignments),
         has_vertical_borders=has_vertical if borders else None,
         alignment=_attr_val(tbl_jc, "val"),
         width_type=_attr_val(tbl_w, "type"),

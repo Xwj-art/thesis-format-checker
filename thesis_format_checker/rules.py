@@ -1,40 +1,61 @@
 from __future__ import annotations
 
+import json
 import re
+from functools import lru_cache
 from pathlib import Path
 
 from .model import RuleSet
 
 
-_A4_WIDTH_CM = 21.0
-_A4_HEIGHT_CM = 29.7
+DEFAULT_RULES_PATH = Path(__file__).resolve().with_name("default_rules.md")
+_CONFIG_BLOCK_RE = re.compile(
+    r"```(?:json\s+)?thesis-format-rules\s*\n(.*?)\n```",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 
-def _extract_manual_review_items() -> tuple[str, ...]:
-    plan_path = Path(__file__).resolve().parent.parent / "DEVELOPMENT_PLAN.md"
-    if not plan_path.exists():
-        return (
-            "cover page exact layout",
-            "electronic signatures",
-            "precise table border style / three-line table validation",
-            "image-internal text size or embedded captions",
-            "visual large whitespace caused by pagination",
-        )
+def _extract_config(raw_markdown: str, source_path: Path) -> dict:
+    match = _CONFIG_BLOCK_RE.search(raw_markdown)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid thesis-format-rules JSON in {source_path}: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"thesis-format-rules JSON must be an object in {source_path}")
+    return parsed
 
-    raw = plan_path.read_text(encoding="utf-8")
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        base_value = merged.get(key)
+        if isinstance(base_value, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(base_value, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+@lru_cache(maxsize=1)
+def default_rules() -> RuleSet:
+    return load_rules(DEFAULT_RULES_PATH)
+
+
+def _default_config() -> dict:
+    return default_rules().config
+
+
+def _extract_manual_review_items(raw: str, config: dict) -> tuple[str, ...]:
     match = re.search(
         r"^## Manual Review Items\s*(.*?)(?:\n## |\Z)",
         raw,
         flags=re.MULTILINE | re.DOTALL,
     )
     if not match:
-        return (
-            "cover page exact layout",
-            "electronic signatures",
-            "precise table border style / three-line table validation",
-            "image-internal text size or embedded captions",
-            "visual large whitespace caused by pagination",
-        )
+        return tuple(str(item) for item in config.get("manual_review_items", ()))
 
     items: list[str] = []
     for line in match.group(1).splitlines():
@@ -44,13 +65,14 @@ def _extract_manual_review_items() -> tuple[str, ...]:
         item = stripped[2:].strip()
         if item:
             items.append(item)
-    return tuple(items)
+    return tuple(items) if items else tuple(str(item) for item in config.get("manual_review_items", ()))
 
 
-def _extract_expected_page_settings(raw_markdown: str) -> dict[str, float]:
+def _extract_expected_page_settings(raw_markdown: str, config: dict) -> dict[str, float]:
     expected: dict[str, float] = {
-        "page_width_cm": _A4_WIDTH_CM,
-        "page_height_cm": _A4_HEIGHT_CM,
+        key: float(value)
+        for key, value in config.get("page", {}).items()
+        if isinstance(value, int | float)
     }
 
     margin_match = re.search(
@@ -90,10 +112,21 @@ def load_rules(path: str | Path) -> RuleSet:
     """Load Markdown requirements into a compact rule model."""
     rule_path = Path(path)
     raw = rule_path.read_text(encoding="utf-8")
+    config = _extract_config(raw, rule_path)
+    if rule_path.resolve() != DEFAULT_RULES_PATH.resolve():
+        config = _deep_merge(_default_config(), config)
+    expected_header_text = _extract_expected_header_text(raw)
+    if expected_header_text is None:
+        header = config.get("header", {})
+        if isinstance(header, dict):
+            value = header.get("body_text")
+            if isinstance(value, str) and value:
+                expected_header_text = value
     return RuleSet(
         source_path=rule_path,
         raw_markdown=raw,
-        expected_header_text=_extract_expected_header_text(raw),
-        expected_page=_extract_expected_page_settings(raw),
-        manual_review_items=_extract_manual_review_items(),
+        config=config,
+        expected_header_text=expected_header_text,
+        expected_page=_extract_expected_page_settings(raw, config),
+        manual_review_items=_extract_manual_review_items(raw, config),
     )

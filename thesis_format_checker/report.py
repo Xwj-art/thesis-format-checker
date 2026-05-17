@@ -22,7 +22,6 @@ def render_markdown_report(document: DocumentInfo, rules: RuleSet, result: Check
         "",
         "## 汇总",
         "",
-        f"- 错误：{counts[Severity.ERROR]}",
         f"- 警告：{counts[Severity.WARNING]}",
         f"- 信息：{counts[Severity.INFO]}",
         "",
@@ -31,11 +30,10 @@ def render_markdown_report(document: DocumentInfo, rules: RuleSet, result: Check
     ]
 
     severity_labels = {
-        Severity.ERROR: "错误",
         Severity.WARNING: "警告",
         Severity.INFO: "信息",
     }
-    for severity in (Severity.ERROR, Severity.WARNING, Severity.INFO):
+    for severity in (Severity.WARNING, Severity.INFO):
         lines.extend([f"### {severity_labels[severity]}", ""])
         if not issues_by_severity[severity]:
             lines.append("无")

@@ -5,6 +5,11 @@
 输入学校格式要求 Markdown 文件和论文 `.docx` 文件，输出一份 Markdown
 检查报告。工具只做静态检查，不会修改论文文件。
 
+格式规则不再写死在 Python 检查逻辑中。默认规则文档位于
+`thesis_format_checker/default_rules.md`，其中的 `thesis-format-rules`
+JSON 配置块是程序实际读取的检查配置；自定义学校规则时，可以在传入的
+Markdown 文件里加入同名配置块覆盖默认值。
+
 ## 当前能力
 
 - 读取 `.docx` 内部 XML，不依赖 Word、WPS 或 LibreOffice。
@@ -23,6 +28,13 @@
 
 ```bash
 python3 -m thesis_format_checker 毕业论文格式要求.md 我的论文.docx -o reports/report.md
+```
+
+也可以直接使用仓库内置规则文档：
+
+```bash
+python3 -m thesis_format_checker thesis_format_checker/default_rules.md 我的论文.docx \
+  -o reports/report.md
 ```
 
 查看帮助：

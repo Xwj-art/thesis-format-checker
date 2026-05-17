@@ -106,6 +106,86 @@ class DocxReaderTests(unittest.TestCase):
             self.assertAlmostEqual(paragraph.line_spacing_pt or 0.0, 20.0)
             self.assertIsNone(paragraph.line_spacing_multiple)
 
+    def test_read_docx_parses_italic_from_style(self) -> None:
+        styles_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Normal">
+    <w:rPr>
+      <w:i/>
+    </w:rPr>
+  </w:style>
+</w:styles>
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = build_minimal_docx(
+                Path(tmpdir) / "fixture.docx",
+                paragraph_properties_xml='<w:pPr><w:pStyle w:val="Normal"/></w:pPr>',
+                styles_xml=styles_xml,
+            )
+
+            paragraph = read_docx(docx_path).paragraphs[0]
+
+            self.assertTrue(paragraph.runs[0].italic)
+
+    def test_read_docx_parses_vertical_align_from_style(self) -> None:
+        styles_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="Normal">
+    <w:rPr>
+      <w:vertAlign w:val="superscript"/>
+    </w:rPr>
+  </w:style>
+</w:styles>
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = build_minimal_docx(
+                Path(tmpdir) / "fixture.docx",
+                paragraph_properties_xml='<w:pPr><w:pStyle w:val="Normal"/></w:pPr>',
+                styles_xml=styles_xml,
+            )
+
+            paragraph = read_docx(docx_path).paragraphs[0]
+
+            self.assertEqual(paragraph.runs[0].vertical_align, "superscript")
+
+    def test_read_docx_parses_runs_nested_in_hyperlinks(self) -> None:
+        body_runs_xml = """
+      <w:r><w:t>引用</w:t></w:r>
+      <w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>[</w:t></w:r>
+      <w:hyperlink w:anchor="_Ref1">
+        <w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>1</w:t></w:r>
+      </w:hyperlink>
+      <w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>]</w:t></w:r>
+"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = build_minimal_docx(
+                Path(tmpdir) / "fixture.docx",
+                body_runs_xml=body_runs_xml,
+            )
+
+            paragraph = read_docx(docx_path).paragraphs[0]
+
+            self.assertEqual(paragraph.text, "引用[1]")
+            self.assertEqual([run.text for run in paragraph.runs], ["引用", "[", "1", "]"])
+            self.assertEqual([run.vertical_align for run in paragraph.runs[1:]], ["superscript", "superscript", "superscript"])
+
+    def test_read_docx_parses_line_based_paragraph_spacing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            docx_path = build_minimal_docx(
+                Path(tmpdir) / "fixture.docx",
+                paragraph_properties_xml=(
+                    '<w:pPr><w:spacing w:beforeLines="50" w:afterLines="50" '
+                    'w:line="400" w:lineRule="exact"/></w:pPr>'
+                ),
+            )
+
+            paragraph = read_docx(docx_path).paragraphs[0]
+
+            self.assertAlmostEqual(paragraph.space_before_lines or 0.0, 0.5)
+            self.assertAlmostEqual(paragraph.space_after_lines or 0.0, 0.5)
+            self.assertEqual(paragraph.line_spacing_rule, "exact")
+            self.assertAlmostEqual(paragraph.line_spacing_pt or 0.0, 20.0)
+
     def test_read_docx_parses_table_cell_paragraph_spacing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             docx_path = build_minimal_docx(
@@ -135,6 +215,8 @@ class DocxReaderTests(unittest.TestCase):
 """
             first_row_cell_properties_xml = """
           <w:tcPr>
+            <w:tcW w:w="5000" w:type="pct"/>
+            <w:vAlign w:val="center"/>
             <w:tcBorders>
               <w:bottom w:val="single" w:sz="6" w:space="0" w:color="auto"/>
             </w:tcBorders>
@@ -143,6 +225,10 @@ class DocxReaderTests(unittest.TestCase):
             table_extra_rows_xml = """
       <w:tr>
         <w:tc>
+          <w:tcPr>
+            <w:tcW w:w="5000" w:type="pct"/>
+            <w:vAlign w:val="center"/>
+          </w:tcPr>
           <w:p>
             <w:r>
               <w:t>Second row</w:t>
@@ -168,6 +254,9 @@ class DocxReaderTests(unittest.TestCase):
             self.assertEqual(table.horizontal_line_count, 3)
             self.assertEqual(table.horizontal_line_positions, ("top", "after row 1", "bottom"))
             self.assertEqual(table.header_bottom_border_sizes, (6,))
+            self.assertEqual(table.cell_width_types, (("pct",), ("pct",)))
+            self.assertEqual(table.cell_width_values, ((5000,), (5000,)))
+            self.assertEqual(table.cell_vertical_alignments, ("center", "center"))
 
     def test_read_docx_rejects_missing_or_wrong_extension(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
