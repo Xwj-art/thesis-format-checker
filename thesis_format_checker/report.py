@@ -22,18 +22,26 @@ def render_markdown_report(document: DocumentInfo, rules: RuleSet, result: Check
         "",
         "## 汇总",
         "",
-        f"- 警告：{counts[Severity.WARNING]}",
-        f"- 信息：{counts[Severity.INFO]}",
-        "",
-        "## 按严重性分组的问题",
-        "",
     ]
+    if counts[Severity.ERROR]:
+        lines.append(f"- 错误：{counts[Severity.ERROR]}")
+    lines.extend(
+        [
+            f"- 警告：{counts[Severity.WARNING]}",
+            f"- 信息：{counts[Severity.INFO]}",
+            "",
+            "## 按严重性分组的问题",
+            "",
+        ]
+    )
 
     severity_labels = {
+        Severity.ERROR: "错误",
         Severity.WARNING: "警告",
         Severity.INFO: "信息",
     }
-    for severity in (Severity.WARNING, Severity.INFO):
+    severities = (Severity.ERROR, Severity.WARNING, Severity.INFO) if counts[Severity.ERROR] else (Severity.WARNING, Severity.INFO)
+    for severity in severities:
         lines.extend([f"### {severity_labels[severity]}", ""])
         if not issues_by_severity[severity]:
             lines.append("无")
@@ -54,6 +62,14 @@ def render_markdown_report(document: DocumentInfo, rules: RuleSet, result: Check
     lines.extend(["## 已检查项", ""])
     if result.checked_items:
         for item in result.checked_items:
+            lines.append(f"- {item}")
+    else:
+        lines.append("无")
+    lines.append("")
+
+    lines.extend(["## 已跳过项", ""])
+    if result.skipped_items:
+        for item in result.skipped_items:
             lines.append(f"- {item}")
     else:
         lines.append("无")

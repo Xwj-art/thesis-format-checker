@@ -91,7 +91,7 @@ def run_rendered_pdf_checks(pdf_path: str | Path, rules: RuleSet) -> CheckResult
 
     pages = _split_pages(completed.stdout)
     issues: list[Issue] = []
-    body_page_index = _find_body_start_page(pages)
+    body_page_index = _find_body_start_page(pages, rules)
     if body_page_index is None:
         issues.append(
             Issue(
@@ -188,12 +188,31 @@ def _nonempty_lines(page: str) -> list[str]:
     return [line.strip() for line in page.splitlines() if line.strip()]
 
 
-def _find_body_start_page(pages: list[str]) -> int | None:
+def _find_body_start_page(pages: list[str], rules: RuleSet | None = None) -> int | None:
+    pattern = _body_start_pattern(rules)
     for index, page in enumerate(pages):
+        if pattern is not None:
+            if any(pattern.search(line.strip()) for line in _nonempty_lines(page)):
+                return index
         compact = re.sub(r"\s+", "", page)
         if "第1章" in compact or "第1章绪论" in compact:
             return index
     return None
+
+
+def _body_start_pattern(rules: RuleSet | None) -> re.Pattern[str] | None:
+    if rules is None:
+        return None
+    try:
+        pattern = rules.config["structure"]["patterns"]["body_start"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(pattern, str):
+        return None
+    try:
+        return re.compile(pattern)
+    except re.error:
+        return None
 
 
 def _bottom_page_number(page: str) -> str | None:

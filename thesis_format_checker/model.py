@@ -127,4 +127,5 @@ class Issue:
 class CheckResult:
     issues: tuple[Issue, ...]
     checked_items: tuple[str, ...] = ()
+    skipped_items: tuple[str, ...] = ()
     unsupported_items: tuple[str, ...] = ()

@@ -13,6 +13,10 @@
 
 ```json thesis-format-rules
 {
+  "profile": {
+    "school_name": "武汉理工大学",
+    "extends": "builtin-whut-v1"
+  },
   "tolerances": {
     "page_cm": 0.1,
     "line_spacing_pt": 0.5,

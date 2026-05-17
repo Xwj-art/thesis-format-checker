@@ -72,10 +72,12 @@ def _print_summary(output_path: Path, result, json_summary: bool) -> None:
     counts = _severity_counts(result)
     summary = {
         "output_path": str(output_path),
+        "error": counts[Severity.ERROR.value],
         "warning": counts[Severity.WARNING.value],
         "info": counts[Severity.INFO.value],
-        "total": counts[Severity.WARNING.value] + counts[Severity.INFO.value],
+        "total": counts[Severity.ERROR.value] + counts[Severity.WARNING.value] + counts[Severity.INFO.value],
         "checked_items": len(result.checked_items),
+        "skipped_items": len(result.skipped_items),
         "unsupported_items": len(result.unsupported_items),
     }
     if json_summary:
@@ -122,6 +124,9 @@ def main(argv: list[str] | None = None) -> int:
     except DocxReadError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except ValueError as exc:
+        print(f"error: invalid rules config: {exc}", file=sys.stderr)
+        return 2
     except OSError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -142,6 +147,9 @@ def _merge_results(left: CheckResult, right: CheckResult) -> CheckResult:
         issues=tuple(left.issues) + tuple(right.issues),
         checked_items=tuple(left.checked_items) + tuple(
             item for item in right.checked_items if item not in left.checked_items
+        ),
+        skipped_items=tuple(left.skipped_items) + tuple(
+            item for item in right.skipped_items if item not in left.skipped_items
         ),
         unsupported_items=tuple(left.unsupported_items),
     )
@@ -168,5 +176,6 @@ def _add_rendered_pdf_missing_notice(result: CheckResult, rules) -> CheckResult:
     return CheckResult(
         issues=tuple(result.issues) + (notice,),
         checked_items=tuple(result.checked_items),
+        skipped_items=tuple(result.skipped_items),
         unsupported_items=unsupported_items,
     )

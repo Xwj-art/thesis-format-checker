@@ -9,6 +9,10 @@
 
 ```json thesis-format-rules
 {
+  "profile": {
+    "school_name": "武汉理工大学",
+    "extends": "builtin-whut-v1"
+  },
   "tolerances": {
     "page_cm": 0.1,
     "line_spacing_pt": 0.5,
@@ -19,12 +23,12 @@
   "page": {
     "page_width_cm": 21.0,
     "page_height_cm": 29.7,
-    "margin_top_cm": 2.5,
-    "margin_bottom_cm": 2.0,
-    "margin_left_cm": 2.5,
-    "margin_right_cm": 2.0,
-    "header_distance_cm": 2.6,
-    "footer_distance_cm": 2.4
+    "margin_top_cm": 2.54,
+    "margin_bottom_cm": 2.54,
+    "margin_left_cm": 3.17,
+    "margin_right_cm": 3.17,
+    "header_distance_cm": 1.27,
+    "footer_distance_cm": 1.27
   },
   "header": {
     "body_text": "武汉理工大学本科毕业设计（论文）",
@@ -216,9 +220,9 @@
 ## 2. 页面设置
 
 - 纸张：A4。
-- 页边距：上 2.5 cm，下 2 cm，左 2.5 cm，右 2 cm。
-- 页眉距离：2.6 cm。
-- 页脚距离：2.4 cm。
+- 页边距：上 2.54 cm，下 2.54 cm，左 3.17 cm，右 3.17 cm。
+- 页眉距离：1.27 cm。
+- 页脚距离：1.27 cm。
 - 标题以外正文行距：固定值 20 磅。
 - Word 中的 `1.5 倍行距`、`多倍行距`、`单倍行距`、`最小值 20 磅` 都不等同于模板要求的 `固定值 20 磅`；除标题等模板明确例外外，正文类段落必须使用固定值 20 磅。
 - 字符间距：标准。

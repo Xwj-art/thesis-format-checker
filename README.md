@@ -14,13 +14,27 @@
 - 面向工具的规则来源：检测脚本会读取传入的 Markdown 文件，并从其中抽取可解析的配置或格式约束。
 - 面向其他学校的定制模板：其他学校可以复制这个文件，改成自己的 `xx大学毕业论文格式要求.md`，再传给检测命令，实现个性化格式检测。
 
-仓库内还包含 `thesis_format_checker/default_rules.md`。它是程序包内置的默认规则配置，包含 `thesis-format-rules` JSON 配置块。自定义学校规则时，建议保留可读说明，并按需增加同名 JSON 配置块来覆盖默认值。
+小提示：格式要求 `.md` 文件非常重要。不同学校的格式要求可能散落在 Word 模板、PDF 手册、网页通知或学院补充说明里，承载形式差异很大，所以本项目没有制作“自动解析学校格式要求”的脚本。定制外校规则时，建议务必参考当前仓库里的 [whut毕业论文格式要求.md](./whut毕业论文格式要求.md)，把学校原始要求和这个 Markdown 模板一起交给 AI，让 AI 对照模板中列出的项目逐项填写，再人工核对关键数值和启用的检查项。
 
-最小示例：
+仓库内还包含 `thesis_format_checker/default_rules.md`。它是程序包内置的 WHUT 默认规则配置，包含 `thesis-format-rules` JSON 配置块。规则文件可以选择两种继承方式：
+
+- `profile.extends: "builtin-whut-v1"`：继承 WHUT 默认规则，再覆盖局部字段。适合 WHUT 规则微调或同校不同模板。
+- `profile.extends: "none"`：不继承 WHUT 学校规则，只使用本文件显式启用和配置的检查。适合其他学校从少量规则开始定制。
+
+`checks.enabled` 可以限制实际运行的检查项或检查组，`checks.disabled` 可以关闭继承规则中的某些检查。常用检查组包括 `structure`、`page`、`header`、`keywords`、`references`、`tables`、`captions`、`body`、`mixed_language`、`thanks`、`line_spacing`。
+
+外校独立规则最小示例：
 
 ````markdown
 ```json thesis-format-rules
 {
+  "profile": {
+    "school_name": "某大学",
+    "extends": "none"
+  },
+  "checks": {
+    "enabled": ["page", "keywords"]
+  },
   "page": {
     "margin_top_cm": 2.5,
     "margin_bottom_cm": 2.0,
@@ -31,15 +45,12 @@
     "en_label": "Key Words",
     "label_delimiter": "：",
     "separator": "；"
-  },
-  "reference": {
-    "citation_separator": "，"
   }
 }
 ```
 ````
 
-如果没有提供某个配置项，检测器会回退到内置默认规则。
+如果不写 `profile.extends`，检测器会保持向后兼容，按 `builtin-whut-v1` 继承 WHUT 默认规则。其他学校建议显式写 `extends: "none"`，避免未声明的 WHUT 摘要、致谢、三线表、页眉等规则造成误报。
 
 ## 当前能力
 
@@ -88,9 +99,14 @@ python3 -m thesis_format_checker --help
 
 1. 复制 [whut毕业论文格式要求.md](./whut毕业论文格式要求.md)。
 2. 改名为本校规则文件，例如 `某大学毕业论文格式要求.md`。
-3. 修改 Markdown 中的格式说明。
-4. 如需改变检测器实际使用的数值或关键词、参考文献等规则，在文件中加入或修改 `thesis-format-rules` JSON 配置块。
-5. 运行：
+3. 收集本校格式要求原文，例如 Word 模板、PDF 手册、网页通知、学院补充说明等。
+4. 推荐把“本校格式要求原文 + 复制出来的 Markdown 模板”交给 AI，让它按模板已经列出的项目逐项填写或标注“不要求/未找到”。
+5. 人工核对页面设置、页眉页码、关键词、正文、图表、参考文献等关键数值。
+6. 修改 Markdown 中的格式说明。
+7. 在 `thesis-format-rules` JSON 配置块中设置 `profile.extends`。其他学校建议使用 `"none"`。
+8. 用 `checks.enabled` 启用本校明确要求的检查项或检查组；未启用的检查会进入报告的“已跳过项”。
+9. 按需填写页面、关键词、正文、参考文献等具体规则。
+10. 运行：
 
 ```bash
 python3 -m thesis_format_checker 某大学毕业论文格式要求.md 我的论文.docx -o reports/report.md

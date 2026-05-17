@@ -9,6 +9,7 @@ from thesis_format_checker.checks import (
     _check_captions,
     _check_caption_object_order,
     _check_continued_table_layout,
+    _check_registry,
     _check_header_text,
     _check_headings,
     _check_heading_script_fonts,
@@ -22,12 +23,27 @@ from thesis_format_checker.checks import (
     _check_static_headers_and_page_numbers,
     _check_table_borders,
     _check_table_cell_typography,
+    run_checks,
 )
 from thesis_format_checker.model import DocumentInfo, ParagraphInfo, RuleSet, RunInfo, SectionInfo, Severity, TableInfo
 from thesis_format_checker.rules import load_rules
 
 
 class ChecksTests(unittest.TestCase):
+    def _load_rules_from_json(self, json_body: str) -> RuleSet:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                f"""# Requirements
+
+```json thesis-format-rules
+{json_body}
+```
+""",
+                encoding="utf-8",
+            )
+            return load_rules(rules_path)
+
     def test_header_text_requires_undergraduate_wording(self) -> None:
         rules = RuleSet(
             source_path=Path("rules.md"),
@@ -480,6 +496,1043 @@ class ChecksTests(unittest.TestCase):
 
             self.assertEqual(structure_issues, [])
             self.assertFalse(any(issue.code == "REFERENCE_CITATION_TARGET" for issue in citation_issues))
+
+    def test_extends_none_page_setup_only_skips_unrelated_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["PAGE_SETUP"]},
+  "tolerances": {"page_cm": 0.1},
+  "page": {"margin_top_cm": 2.5}
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                sections=(SectionInfo(index=0, margin_top_cm=3.0),),
+                paragraphs=(
+                    ParagraphInfo(index=0, text="Title page"),
+                    ParagraphInfo(index=1, text="Body paragraph without school-specific structure."),
+                ),
+            )
+
+            result = run_checks(document, rules)
+            codes = {issue.code for issue in result.issues}
+
+            self.assertEqual(codes, {"PAGE_SETUP"})
+            self.assertIn("PAGE_SETUP", result.checked_items)
+            self.assertNotIn("STRUCTURE_ABSTRACT_EN", result.checked_items)
+            self.assertTrue(any("STRUCTURE_ABSTRACT_EN" in item for item in result.skipped_items))
+            self.assertTrue(any("KEYWORD_LABEL_FORMAT" in item for item in result.skipped_items))
+
+    def test_disabled_check_suppresses_whut_inherited_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "builtin-whut-v1"},
+  "checks": {"disabled": ["STRUCTURE_THANKS"]}
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    ParagraphInfo(index=0, text="摘  要"),
+                    ParagraphInfo(index=1, text="Abstract"),
+                    ParagraphInfo(index=2, text="目录"),
+                    ParagraphInfo(index=3, text="第1章 绪论"),
+                    ParagraphInfo(index=4, text="参考文献"),
+                ),
+            )
+
+            result = run_checks(document, rules)
+
+            self.assertFalse(any(issue.code == "STRUCTURE_THANKS" for issue in result.issues))
+            self.assertTrue(any("STRUCTURE_THANKS" in item for item in result.skipped_items))
+
+    def test_keywords_enabled_group_runs_only_keyword_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["keywords"]},
+  "keywords": {
+    "min_count": 3,
+    "max_count": 5,
+    "cn_label": "关键词",
+    "en_label": "Key Words",
+    "label_delimiter": "：",
+    "allow_space_before_delimiter": false,
+    "allow_space_after_delimiter": false,
+    "separator": "；",
+    "forbid_trailing_separator": true
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                sections=(SectionInfo(index=0, margin_top_cm=3.0),),
+                paragraphs=(ParagraphInfo(index=0, text="Key Words: alpha; beta"),),
+            )
+
+            result = run_checks(document, rules)
+            codes = {issue.code for issue in result.issues}
+
+            self.assertTrue(codes)
+            self.assertTrue(all(code.startswith("KEYWORD_") for code in codes))
+            self.assertIn("KEYWORD_LABEL_FORMAT", codes)
+            self.assertNotIn("PAGE_SETUP", codes)
+            self.assertFalse(any(code.startswith("STRUCTURE_") for code in codes))
+
+    def test_custom_english_structure_body_range_used_by_body_typography(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                r"""# Requirements
+
+```json thesis-format-rules
+{
+  "structure": {
+    "headings": {
+      "reference": ["References"]
+    },
+    "patterns": {
+      "body_start": "^Chapter\\s+1\\b",
+      "heading_level_1": "^Chapter\\s+\\d+(?:\\s+.+)?$"
+    }
+  },
+  "body": {
+    "first_line_indent_chars": 2.0,
+    "space_before_pt": 0.0,
+    "space_after_pt": 0.0,
+    "size_pt": 12.0,
+    "east_asia": "宋体",
+    "ascii": "Times New Roman"
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            cover = ParagraphInfo(
+                index=0,
+                text="Cover page text",
+                first_line_indent_chars=0.0,
+                runs=(RunInfo(text="Cover page text", font_ascii="Times New Roman", size_pt=12.0),),
+            )
+            body = ParagraphInfo(
+                index=2,
+                text="This body paragraph should be checked.",
+                first_line_indent_chars=0.0,
+                space_before_pt=0.0,
+                space_after_pt=0.0,
+                runs=(
+                    RunInfo(
+                        text="This body paragraph should be checked.",
+                        font_ascii="Times New Roman",
+                        size_pt=12.0,
+                    ),
+                ),
+            )
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    cover,
+                    ParagraphInfo(index=1, text="Chapter 1 Introduction"),
+                    body,
+                    ParagraphInfo(index=3, text="References"),
+                ),
+            )
+
+            issues = _check_body_typography(document, rules)
+
+            self.assertTrue(any(issue.code == "BODY_INDENT" and issue.evidence == body.text for issue in issues))
+            self.assertFalse(any(issue.evidence == cover.text for issue in issues))
+
+    def test_no_english_abstract_when_not_required_does_not_warn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                r"""# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["structure"]},
+  "structure": {
+    "headings": {
+      "abstract_cn": ["摘要"]
+    },
+    "patterns": {
+      "body_start": "^第\\s*1\\s*章\\b"
+    },
+    "required": {
+      "STRUCTURE_ABSTRACT_CN": ["摘要", "Chinese abstract heading was not detected."],
+      "STRUCTURE_BODY_START": ["第1章", "Chapter 1 heading was not detected."]
+    }
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    ParagraphInfo(index=0, text="摘要"),
+                    ParagraphInfo(index=1, text="第1章 绪论"),
+                ),
+            )
+
+            issues = _check_structure_presence(document, rules)
+
+            self.assertFalse(any(issue.code == "STRUCTURE_ABSTRACT_EN" for issue in issues))
+            self.assertEqual(issues, [])
+
+    def test_toc_heading_with_toc_style_is_still_detected_as_structure_heading(self) -> None:
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(
+                ParagraphInfo(index=0, text="摘  要"),
+                ParagraphInfo(index=1, text="Abstract"),
+                ParagraphInfo(index=2, text="目　　录", style="TOC10", style_name="TOC 标题1"),
+                ParagraphInfo(index=3, text="第1章 绪论"),
+                ParagraphInfo(index=4, text="参考文献"),
+                ParagraphInfo(index=5, text="致  谢"),
+            ),
+        )
+
+        issues = _check_structure_presence(document)
+
+        self.assertFalse(any(issue.code == "STRUCTURE_TOC" for issue in issues))
+
+    def test_extends_none_enabled_body_without_body_config_does_not_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["body"]}
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(ParagraphInfo(index=0, text="A body paragraph."),),
+            )
+
+            result = run_checks(document, rules)
+
+            self.assertEqual(result.issues, ())
+            self.assertNotIn("BODY_INDENT", result.checked_items)
+            self.assertTrue(any("BODY_INDENT" in item and "missing config" in item for item in result.skipped_items))
+
+    def test_checks_enabled_unknown_item_reports_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["NOT_A_CHECK"]}
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+
+            with self.assertRaisesRegex(ValueError, "NOT_A_CHECK"):
+                run_checks(DocumentInfo(path=Path("fixture.docx")), rules)
+
+    def test_checks_config_wrong_type_reports_config_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": "page"}
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+
+            with self.assertRaisesRegex(ValueError, "checks\\.enabled"):
+                run_checks(DocumentInfo(path=Path("fixture.docx")), rules)
+
+    def test_table_checks_can_be_disabled_for_grid_table_school(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "checks": {"disabled": ["tables"]}
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(ParagraphInfo(index=0, block_index=0, text="第1章 绪论"),),
+                tables=(
+                    TableInfo(
+                        index=1,
+                        block_index=1,
+                        rows=(("字段", "说明"), ("name", "商品名称")),
+                        border_values=("top=single", "bottom=single", "insideH=single", "insideV=single"),
+                        has_vertical_borders=True,
+                    ),
+                ),
+            )
+
+            result = run_checks(document, rules)
+            codes = {issue.code for issue in result.issues}
+
+            self.assertNotIn("TABLE_BORDER", codes)
+            self.assertNotIn("TABLE_THREE_LINE", codes)
+            self.assertTrue(any("TABLE_BORDER" in item and "disabled" in item for item in result.skipped_items))
+
+    def test_mixed_language_spacing_can_be_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "checks": {"disabled": ["mixed_language"]}
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    ParagraphInfo(index=0, text="第1章 绪论"),
+                    ParagraphInfo(index=1, text="本文基于 Spring AI 实现智能客服。"),
+                ),
+            )
+
+            result = run_checks(document, rules)
+
+            self.assertFalse(any(issue.code == "MIXED_LANGUAGE_SPACING" for issue in result.issues))
+            self.assertTrue(any("MIXED_LANGUAGE_SPACING" in item and "disabled" in item for item in result.skipped_items))
+
+    def test_toc_field_check_can_be_disabled_for_manual_toc_school(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "checks": {"disabled": ["toc"]}
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    ParagraphInfo(index=0, text="目录"),
+                    ParagraphInfo(index=1, text="第1章 绪论"),
+                ),
+            )
+
+            result = run_checks(document, rules)
+
+            self.assertFalse(any(issue.code == "TOC_FIELD" for issue in result.issues))
+            self.assertTrue(any("TOC_FIELD" in item and "disabled" in item for item in result.skipped_items))
+
+    def test_reference_field_check_can_be_disabled_for_manual_citation_school(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "checks": {"disabled": ["REFERENCE_CITATION_FIELD"]}
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            paragraph = ParagraphInfo(
+                index=1,
+                text="相关研究见[1]。",
+                runs=(
+                    RunInfo(text="相关研究见"),
+                    RunInfo(text="[1]", vertical_align="superscript"),
+                    RunInfo(text="。"),
+                ),
+            )
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    ParagraphInfo(index=0, text="第1章 绪论"),
+                    paragraph,
+                    ParagraphInfo(index=2, text="参考文献"),
+                    ParagraphInfo(index=3, text="[1] 作者. 题名[J]. 期刊,2024,1(1):1-2."),
+                ),
+            )
+
+            result = run_checks(document, rules)
+
+            self.assertFalse(any(issue.code == "REFERENCE_CITATION_FIELD" for issue in result.issues))
+            self.assertTrue(
+                any("REFERENCE_CITATION_FIELD" in item and "disabled" in item for item in result.skipped_items)
+            )
+
+    def test_figure_dot_numbering_allowed_when_numbering_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "checks": {"disabled": ["numbering"]}
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    ParagraphInfo(index=0, text="第1章 绪论"),
+                    ParagraphInfo(index=1, text="图 1.1 系统结构"),
+                ),
+            )
+
+            result = run_checks(document, rules)
+
+            self.assertFalse(any(issue.code == "FIGURE_NUMBERING" for issue in result.issues))
+            self.assertTrue(any("FIGURE_NUMBERING" in item and "disabled" in item for item in result.skipped_items))
+
+    def test_keywords_custom_count_and_separator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["keywords"]},
+  "keywords": {
+    "min_count": 2,
+    "max_count": 2,
+    "cn_label": "关键词",
+    "en_label": "Keywords",
+    "label_delimiter": ":",
+    "allow_space_before_delimiter": false,
+    "allow_space_after_delimiter": true,
+    "separator": ";",
+    "forbid_trailing_separator": false
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(ParagraphInfo(index=0, text="Keywords: AI; RAG"),))
+
+            result = run_checks(document, rules)
+
+            self.assertFalse(any(issue.code.startswith("KEYWORD_") for issue in result.issues))
+            self.assertIn("KEYWORD_COUNT", result.checked_items)
+
+    def test_keywords_allow_trailing_separator_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["keywords"]},
+  "keywords": {
+    "min_count": 2,
+    "max_count": 3,
+    "cn_label": "关键词",
+    "en_label": "Keywords",
+    "label_delimiter": ":",
+    "allow_space_before_delimiter": false,
+    "allow_space_after_delimiter": true,
+    "separator": ";",
+    "forbid_trailing_separator": false
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(path=Path("fixture.docx"), paragraphs=(ParagraphInfo(index=0, text="Keywords: AI; RAG;"),))
+
+            result = run_checks(document, rules)
+
+            self.assertFalse(any(issue.code == "KEYWORD_TERMINATOR" for issue in result.issues))
+
+    def test_body_partial_config_skips_missing_subfield_checks_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["body"]},
+  "body": {
+    "size_pt": 12.0,
+    "east_asia": "宋体",
+    "ascii": "Times New Roman"
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(ParagraphInfo(index=0, text="正文内容", runs=(RunInfo(text="正文内容", size_pt=12.0),)),),
+            )
+
+            result = run_checks(document, rules)
+
+            self.assertFalse(any(issue.code in {"BODY_INDENT", "BODY_SPACING"} for issue in result.issues))
+            self.assertIn("BODY_FONT", result.checked_items)
+            self.assertTrue(any("BODY_INDENT" in item and "missing config" in item for item in result.skipped_items))
+
+    def test_header_text_only_config_skips_header_line_checks_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["header"]},
+  "header": {
+    "body_text": "某大学本科毕业论文"
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(path=Path("fixture.docx"), headers=("其他页眉",))
+
+            result = run_checks(document, rules)
+
+            self.assertTrue(any(issue.code == "HEADER_TEXT" for issue in result.issues))
+            self.assertNotIn("HEADER_LINE_WIDTH", result.checked_items)
+            self.assertTrue(any("HEADER_LINE_WIDTH" in item and "missing config" in item for item in result.skipped_items))
+
+    def test_reference_separator_only_config_skips_unconfigured_reference_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["REFERENCE_CITATION_SEPARATOR"]},
+  "structure": {
+    "patterns": {
+      "body_start": "^第\\\\s*1\\\\s*章\\\\b"
+    },
+    "headings": {
+      "reference": ["参考文献"]
+    }
+  },
+  "reference": {
+    "citation_separator": "，"
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            paragraph = ParagraphInfo(
+                index=1,
+                text="相关研究见[1,2]。",
+                field_instructions=("REF _Ref123456 \\r \\h",),
+                runs=(
+                    RunInfo(text="相关研究见"),
+                    RunInfo(text="[1,2]", vertical_align="superscript"),
+                    RunInfo(text="。"),
+                ),
+            )
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    ParagraphInfo(index=0, text="第1章 绪论"),
+                    paragraph,
+                    ParagraphInfo(index=2, text="参考文献"),
+                    ParagraphInfo(index=3, text="[1] 作者. 题名[J]. 期刊,2024."),
+                    ParagraphInfo(index=4, text="[2] 作者. 题名[J]. 期刊,2024."),
+                ),
+            )
+
+            result = run_checks(document, rules)
+
+            self.assertTrue(any(issue.code == "REFERENCE_CITATION_SEPARATOR" for issue in result.issues))
+            self.assertEqual(result.checked_items, ("REFERENCE_CITATION_SEPARATOR",))
+
+    def test_body_font_selector_runs_without_body_indent_or_spacing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["BODY_FONT"]},
+  "body": {
+    "size_pt": 12.0,
+    "east_asia": "宋体",
+    "ascii": "Times New Roman"
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    ParagraphInfo(
+                        index=0,
+                        text="正文内容",
+                        runs=(RunInfo(text="正文内容", font_east_asia="黑体", size_pt=12.0),),
+                    ),
+                ),
+            )
+
+            result = run_checks(document, rules)
+
+            self.assertEqual(result.checked_items, ("BODY_FONT",))
+            self.assertTrue(any(issue.code == "BODY_FONT" for issue in result.issues))
+            self.assertFalse(any(item.startswith("BODY_FONT: missing config") for item in result.skipped_items))
+
+    def test_table_cell_font_selector_runs_without_three_line_table_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["TABLE_CELL_FONT"]},
+  "structure": {
+    "patterns": {
+      "body_start": "^第\\\\s*1\\\\s*章\\\\b"
+    },
+    "headings": {
+      "reference": ["参考文献"]
+    }
+  },
+  "table": {
+    "cell_size_pt": 12.0,
+    "cell_east_asia": "宋体",
+    "cell_ascii": "Times New Roman"
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            table_paragraph = ParagraphInfo(
+                index=1,
+                text="单元格",
+                runs=(RunInfo(text="单元格", font_east_asia="黑体", size_pt=12.0),),
+            )
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(ParagraphInfo(index=0, block_index=0, text="第1章 绪论"),),
+                tables=(
+                    TableInfo(
+                        index=1,
+                        block_index=1,
+                        rows=(("字段", "说明"), ("name", "商品名称")),
+                        paragraphs=(table_paragraph,),
+                    ),
+                ),
+            )
+
+            result = run_checks(document, rules)
+
+            self.assertEqual(result.checked_items, ("TABLE_CELL_FONT",))
+            self.assertTrue(any(issue.code == "TABLE_CELL_FONT" for issue in result.issues))
+            self.assertFalse(any(issue.code in {"TABLE_BORDER", "TABLE_THREE_LINE"} for issue in result.issues))
+
+    @unittest.expectedFailure
+    def test_each_single_check_selector_with_empty_school_config_skips_instead_of_crashing(self) -> None:
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(
+                ParagraphInfo(index=0, block_index=0, text="正文段落"),
+                ParagraphInfo(index=1, block_index=1, text=""),
+                ParagraphInfo(index=2, block_index=2, text=""),
+            ),
+            tables=(
+                TableInfo(
+                    index=1,
+                    block_index=3,
+                    rows=(("字段", "说明"), ("name", "商品名称")),
+                ),
+            ),
+        )
+        item_codes = [item for _group, items, _runner in _check_registry() for item in items]
+
+        for item_code in item_codes:
+            with self.subTest(item_code=item_code):
+                rules = self._load_rules_from_json(
+                    f"""{{
+  "profile": {{"extends": "none"}},
+  "checks": {{"enabled": ["{item_code}"]}}
+}}"""
+                )
+
+                result = run_checks(document, rules)
+
+                self.assertTrue(
+                    item_code in result.checked_items
+                    or any(item.startswith(f"{item_code}:") for item in result.skipped_items)
+                )
+
+    @unittest.expectedFailure
+    def test_heading_punctuation_selector_runs_with_minimal_punctuation_config(self) -> None:
+        rules = self._load_rules_from_json(
+            """{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["HEADING_PUNCTUATION"]},
+  "structure": {
+    "patterns": {
+      "heading_level_1": "^第\\\\s*\\\\d+\\\\s*章(?:\\\\s+.+)?$",
+      "heading_level_2": "^\\\\d+\\\\.\\\\d+(?:\\\\s+.+)?$",
+      "heading_level_3": "^\\\\d+\\\\.\\\\d+\\\\.\\\\d+(?:\\\\s+.+)?$"
+    }
+  },
+  "heading": {
+    "punctuation_suffix": "：:"
+  }
+}"""
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=0, text="第1章 绪论："),),
+        )
+
+        result = run_checks(document, rules)
+
+        self.assertEqual(result.checked_items, ("HEADING_PUNCTUATION",))
+        self.assertTrue(any(issue.code == "HEADING_PUNCTUATION" for issue in result.issues))
+
+    @unittest.expectedFailure
+    def test_caption_separator_selector_runs_with_minimal_separator_config(self) -> None:
+        rules = self._load_rules_from_json(
+            """{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["CAPTION_SEPARATOR"]},
+  "caption": {
+    "separator": " "
+  },
+  "numbering": {
+    "caption_prefix_pattern": "^(?:图|表|续表)\\\\s*\\\\d+-\\\\d+(?:\\\\s+|$)",
+    "caption_pattern": "^(图|表|续表)\\\\s*(\\\\d+-\\\\d+)(\\\\s+)(.+)$"
+  }
+}"""
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=0, text="图3-1  系统架构图"),),
+        )
+
+        result = run_checks(document, rules)
+
+        self.assertEqual(result.checked_items, ("CAPTION_SEPARATOR",))
+        self.assertTrue(any(issue.code == "CAPTION_SEPARATOR" for issue in result.issues))
+
+    @unittest.expectedFailure
+    def test_figure_caption_position_selector_runs_without_caption_typography_config(self) -> None:
+        rules = self._load_rules_from_json(
+            """{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["FIGURE_CAPTION_POSITION"]},
+  "structure": {
+    "patterns": {
+      "body_start": "^第\\\\s*1\\\\s*章\\\\b"
+    },
+    "headings": {
+      "reference": ["参考文献"],
+      "terminal": []
+    }
+  },
+  "numbering": {
+    "figure_caption_pattern": "^图\\\\s*\\\\d+-\\\\d+(?:\\\\s+|$)"
+  }
+}"""
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(
+                ParagraphInfo(index=0, block_index=0, text="第1章 绪论"),
+                ParagraphInfo(index=1, block_index=1, text="图3-1 系统架构图"),
+                ParagraphInfo(index=2, block_index=2, text="", has_drawing=True),
+            ),
+        )
+
+        result = run_checks(document, rules)
+
+        self.assertEqual(result.checked_items, ("FIGURE_CAPTION_POSITION",))
+        self.assertTrue(any(issue.code == "FIGURE_CAPTION_POSITION" for issue in result.issues))
+
+    @unittest.expectedFailure
+    def test_reference_format_selector_runs_without_citation_or_typography_config(self) -> None:
+        rules = self._load_rules_from_json(
+            """{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["REFERENCE_FORMAT"]},
+  "structure": {
+    "patterns": {
+      "heading_level_1": "^第\\\\s*\\\\d+\\\\s*章(?:\\\\s+.+)?$",
+      "heading_level_2": "^\\\\d+\\\\.\\\\d+(?:\\\\s+.+)?$",
+      "heading_level_3": "^\\\\d+\\\\.\\\\d+\\\\.\\\\d+(?:\\\\s+.+)?$"
+    },
+    "headings": {
+      "reference": ["参考文献"],
+      "terminal": []
+    }
+  },
+  "reference": {}
+}"""
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(
+                ParagraphInfo(index=0, text="参考文献"),
+                ParagraphInfo(index=1, text="作者. 缺少类型标识的题名. 2024."),
+            ),
+        )
+
+        result = run_checks(document, rules)
+
+        self.assertEqual(result.checked_items, ("REFERENCE_FORMAT",))
+        self.assertTrue(any(issue.code == "REFERENCE_FORMAT" for issue in result.issues))
+
+    @unittest.expectedFailure
+    def test_table_line_count_selector_runs_with_minimal_line_count_config(self) -> None:
+        rules = self._load_rules_from_json(
+            """{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["TABLE_LINE_COUNT"]},
+  "structure": {
+    "patterns": {
+      "body_start": "^第\\\\s*1\\\\s*章\\\\b"
+    },
+    "headings": {
+      "reference": ["参考文献"]
+    }
+  },
+  "table": {
+    "horizontal_line_count": 3
+  }
+}"""
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(ParagraphInfo(index=0, block_index=0, text="第1章 绪论"),),
+            tables=(
+                TableInfo(
+                    index=1,
+                    block_index=1,
+                    rows=(("字段", "说明"), ("name", "商品名称")),
+                    horizontal_line_count=4,
+                    horizontal_line_positions=("top", "insideH", "insideH", "bottom"),
+                ),
+            ),
+        )
+
+        result = run_checks(document, rules)
+
+        self.assertEqual(result.checked_items, ("TABLE_LINE_COUNT",))
+        self.assertTrue(any(issue.code == "TABLE_LINE_COUNT" for issue in result.issues))
+
+    def test_line_spacing_selector_runs_with_only_body_line_spacing_config(self) -> None:
+        rules = self._load_rules_from_json(
+            """{
+  "profile": {"extends": "none"},
+  "checks": {"enabled": ["LINE_SPACING"]},
+  "structure": {
+    "patterns": {
+      "body_start": "^第\\\\s*1\\\\s*章\\\\b",
+      "heading_level_1": "^第\\\\s*\\\\d+\\\\s*章(?:\\\\s+.+)?$",
+      "heading_level_2": "^\\\\d+\\\\.\\\\d+(?:\\\\s+.+)?$",
+      "heading_level_3": "^\\\\d+\\\\.\\\\d+\\\\.\\\\d+(?:\\\\s+.+)?$"
+    },
+    "headings": {
+      "line_spacing_start": [],
+      "line_spacing_excluded": []
+    }
+  },
+  "numbering": {
+    "caption_prefix_pattern": "^(?:图|表|续表)\\\\s*\\\\d+-\\\\d+(?:\\\\s+|$)"
+  },
+  "body": {
+    "line_spacing_pt": 20.0
+  }
+}"""
+        )
+        document = DocumentInfo(
+            path=Path("fixture.docx"),
+            paragraphs=(
+                ParagraphInfo(index=0, text="第1章 绪论"),
+                ParagraphInfo(index=1, text="正文段落", line_spacing_pt=24.0, line_spacing_rule="exact"),
+            ),
+        )
+
+        result = run_checks(document, rules)
+
+        self.assertEqual(result.checked_items, ("LINE_SPACING",))
+        self.assertTrue(any(issue.code == "LINE_SPACING" for issue in result.issues))
+
+    def test_appendix_stops_body_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                """# Requirements
+
+```json thesis-format-rules
+{
+  "structure": {
+    "headings": {
+      "terminal": ["Appendix"]
+    }
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            appendix_paragraph = ParagraphInfo(
+                index=2,
+                text="Appendix content should not be checked as body text.",
+                first_line_indent_chars=0.0,
+                runs=(RunInfo(text="Appendix content should not be checked as body text.", size_pt=12.0),),
+            )
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    ParagraphInfo(index=0, text="第1章 绪论"),
+                    ParagraphInfo(index=1, text="Appendix"),
+                    appendix_paragraph,
+                ),
+            )
+
+            issues = _check_body_typography(document, rules)
+
+            self.assertFalse(any(issue.evidence == appendix_paragraph.text for issue in issues))
+
+    def test_chinese_number_heading_patterns_are_not_checked_as_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rules_path = Path(tmpdir) / "rules.md"
+            rules_path.write_text(
+                r"""# Requirements
+
+```json thesis-format-rules
+{
+  "structure": {
+    "patterns": {
+      "heading_level_1": "^[一二三四五六七八九十]+、.+$",
+      "heading_level_2": "^（[一二三四五六七八九十]+）.+$"
+    }
+  }
+}
+```
+""",
+                encoding="utf-8",
+            )
+            rules = load_rules(rules_path)
+            heading_1 = ParagraphInfo(index=0, text="一、绪论", first_line_indent_chars=0.0)
+            heading_2 = ParagraphInfo(index=1, text="（一）研究背景", first_line_indent_chars=0.0)
+            document = DocumentInfo(
+                path=Path("fixture.docx"),
+                paragraphs=(
+                    heading_1,
+                    heading_2,
+                    ParagraphInfo(index=2, text="本文介绍研究背景。", first_line_indent_chars=2.0),
+                ),
+            )
+
+            issues = _check_body_typography(document, rules)
+
+            self.assertFalse(any(issue.evidence == heading_1.text for issue in issues))
+            self.assertFalse(any(issue.evidence == heading_2.text for issue in issues))
 
     def test_reference_typography_checks_list_spacing_and_font(self) -> None:
         entry = ParagraphInfo(

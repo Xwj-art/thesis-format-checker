@@ -106,6 +106,8 @@ def _paragraph_location(paragraph: ParagraphInfo) -> str:
 def _is_toc_paragraph(paragraph: ParagraphInfo) -> bool:
     style = paragraph.style or ""
     text = paragraph.text.strip()
+    if _compact_text(text) == "目录":
+        return False
     if style.upper().startswith("TOC"):
         return True
     return bool("\t" in paragraph.text and re.search(r"\d+\s*$", text))
@@ -163,12 +165,27 @@ def _thanks_heading_index(document: DocumentInfo, rules: RuleSet | None = None) 
     return None
 
 
+def _terminal_heading_index(document: DocumentInfo, rules: RuleSet | None = None, *, after_index: int = 0) -> int | None:
+    for paragraph in document.paragraphs:
+        if paragraph.index <= after_index:
+            continue
+        text = paragraph.text.strip()
+        if _is_toc_paragraph(paragraph):
+            continue
+        if _is_terminal_heading(text, rules):
+            return paragraph.index
+    return None
+
+
 def _in_body_range(paragraph: ParagraphInfo, document: DocumentInfo, rules: RuleSet | None = None) -> bool:
     first_body = _first_body_paragraph_index(document, rules)
     reference_start = _reference_heading_index(document, rules)
+    terminal_start = _terminal_heading_index(document, rules, after_index=first_body)
     if paragraph.index < first_body:
         return False
     if reference_start is not None and paragraph.index >= reference_start:
+        return False
+    if terminal_start is not None and paragraph.index >= terminal_start:
         return False
     return True
 
@@ -516,9 +533,13 @@ def _keyword_line_parts(text: str, rules: RuleSet | None = None) -> dict[str, st
 
 def _split_keywords(keyword_text: str, rules: RuleSet | None = None) -> tuple[list[str], bool, bool]:
     expected_separator = str(_cfg(rules, "keywords", "separator"))
-    has_ascii_separator = ";" in keyword_text
-    items = [part.strip() for part in re.split(r"[；;]", keyword_text) if part.strip()]
-    trailing_separator = keyword_text.rstrip().endswith((expected_separator, ";"))
+    alternate_separators = {"；", ";"}
+    has_ascii_separator = ";" in keyword_text and expected_separator != ";"
+    split_pattern = re.escape(expected_separator)
+    if expected_separator in alternate_separators:
+        split_pattern = r"[；;]"
+    items = [part.strip() for part in re.split(split_pattern, keyword_text) if part.strip()]
+    trailing_separator = keyword_text.rstrip().endswith(expected_separator)
     return items, has_ascii_separator, trailing_separator
 
 
@@ -1047,7 +1068,7 @@ def _check_keywords(document: DocumentInfo, rules: RuleSet | None = None) -> lis
                     evidence=text,
                 )
             )
-        if has_trailing_separator:
+        if has_trailing_separator and bool(_cfg(rules, "keywords", "forbid_trailing_separator")):
             issues.append(
                 _issue(
                     "KEYWORD_TERMINATOR",
@@ -1943,12 +1964,18 @@ def _check_continued_table_layout(document: DocumentInfo, rules: RuleSet | None 
 
 def _check_table_cell_typography(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
-    expected_cell_alignment = str(_cfg(rules, "table", "cell_alignment"))
-    expected_cell_size = _float_cfg(rules, "table", "cell_size_pt")
-    expected_cell_ascii = str(_cfg(rules, "table", "cell_ascii"))
-    expected_cell_east_asia = str(_cfg(rules, "table", "cell_east_asia"))
-    first_body = _first_body_paragraph_index(document, rules)
-    reference_start = _reference_heading_index(document, rules)
+    expected_cell_alignment = _optional_str_cfg(rules, "table", "cell_alignment")
+    expected_cell_size = _optional_float_cfg(rules, "table", "cell_size_pt")
+    expected_cell_ascii = _optional_str_cfg(rules, "table", "cell_ascii")
+    expected_cell_east_asia = _optional_str_cfg(rules, "table", "cell_east_asia")
+    try:
+        first_body = _first_body_paragraph_index(document, rules)
+    except KeyError:
+        first_body = 0
+    try:
+        reference_start = _reference_heading_index(document, rules)
+    except KeyError:
+        reference_start = None
     reference_block = document.paragraphs[reference_start].block_index if reference_start is not None else None
     for table in document.tables:
         if table.block_index is None:
@@ -1959,10 +1986,14 @@ def _check_table_cell_typography(document: DocumentInfo, rules: RuleSet | None =
             continue
         for paragraph in table.paragraphs:
             text = paragraph.text.strip()
-            if not text or _is_caption_text(text, rules):
+            try:
+                is_caption = _is_caption_text(text, rules)
+            except KeyError:
+                is_caption = False
+            if not text or is_caption:
                 continue
             location = f"table {table.index} paragraph {paragraph.index}"
-            if paragraph.alignment != expected_cell_alignment:
+            if expected_cell_alignment is not None and paragraph.alignment != expected_cell_alignment:
                 issues.append(
                     _issue(
                         "TABLE_CELL_ALIGNMENT",
@@ -1976,7 +2007,7 @@ def _check_table_cell_typography(document: DocumentInfo, rules: RuleSet | None =
                 )
             issues.extend(_check_table_cell_spacing(paragraph, location, rules))
             for run in _visible_runs(paragraph):
-                if run.size_pt is not None and abs(run.size_pt - expected_cell_size) > _float_cfg(
+                if expected_cell_size is not None and run.size_pt is not None and abs(run.size_pt - expected_cell_size) > _float_cfg(
                     rules, "tolerances", "font_size_pt"
                 ):
                     issues.append(
@@ -1991,7 +2022,7 @@ def _check_table_cell_typography(document: DocumentInfo, rules: RuleSet | None =
                         )
                     )
                     break
-                if _has_ascii_word(run.text) and run.font_ascii is not None:
+                if expected_cell_ascii is not None and _has_ascii_word(run.text) and run.font_ascii is not None:
                     if not _font_matches(run.font_ascii, expected_cell_ascii):
                         issues.append(
                             _issue(
@@ -2005,7 +2036,7 @@ def _check_table_cell_typography(document: DocumentInfo, rules: RuleSet | None =
                             )
                         )
                         break
-                if _has_cjk(run.text) and run.font_east_asia is not None:
+                if expected_cell_east_asia is not None and _has_cjk(run.text) and run.font_east_asia is not None:
                     if not _font_matches(run.font_east_asia, expected_cell_east_asia):
                         issues.append(
                             _issue(
@@ -2027,9 +2058,10 @@ def _check_table_cell_spacing(
 ) -> list[Issue]:
     issues: list[Issue] = []
     text = paragraph.text.strip()
-    expected_before = _float_cfg(rules, "table", "cell_space_before_pt")
-    expected_after = _float_cfg(rules, "table", "cell_space_after_pt")
-    if not _space_pt_match(paragraph.space_before_pt, expected_before, rules):
+    expected_before = _optional_float_cfg(rules, "table", "cell_space_before_pt")
+    expected_after = _optional_float_cfg(rules, "table", "cell_space_after_pt")
+    expected_line_spacing = _optional_float_cfg(rules, "table", "cell_line_spacing_pt")
+    if expected_before is not None and not _space_pt_match(paragraph.space_before_pt, expected_before, rules):
         issues.append(
             _issue(
                 "TABLE_CELL_SPACING",
@@ -2041,7 +2073,7 @@ def _check_table_cell_spacing(
                 evidence=text,
             )
         )
-    if not _space_pt_match(paragraph.space_after_pt, expected_after, rules):
+    if expected_after is not None and not _space_pt_match(paragraph.space_after_pt, expected_after, rules):
         issues.append(
             _issue(
                 "TABLE_CELL_SPACING",
@@ -2053,15 +2085,16 @@ def _check_table_cell_spacing(
                 evidence=text,
             )
         )
-    issues.extend(
-        _line_spacing_issues_for_paragraph(
-            paragraph,
-            location,
-            code="TABLE_CELL_SPACING",
-            expected_line_spacing_pt=_float_cfg(rules, "table", "cell_line_spacing_pt"),
-            rules=rules,
+    if expected_line_spacing is not None:
+        issues.extend(
+            _line_spacing_issues_for_paragraph(
+                paragraph,
+                location,
+                code="TABLE_CELL_SPACING",
+                expected_line_spacing_pt=expected_line_spacing,
+                rules=rules,
+            )
         )
-    )
     return issues
 
 
@@ -2301,20 +2334,59 @@ def _check_empty_paragraphs(document: DocumentInfo, rules: RuleSet | None = None
     return issues
 
 
+def _config_path_exists(rules: RuleSet | None, *path: str) -> bool:
+    current = _active_rules(rules).config
+    for item in path:
+        if not isinstance(current, dict) or item not in current:
+            return False
+        current = current[item]
+    return True
+
+
+def _optional_float_cfg(rules: RuleSet | None, *path: str) -> float | None:
+    if not _config_path_exists(rules, *path):
+        return None
+    return _float_cfg(rules, *path)
+
+
+def _optional_str_cfg(rules: RuleSet | None, *path: str) -> str | None:
+    if not _config_path_exists(rules, *path):
+        return None
+    return str(_cfg(rules, *path))
+
+
+def _safe_in_body_range(paragraph: ParagraphInfo, document: DocumentInfo, rules: RuleSet | None = None) -> bool:
+    try:
+        return _in_body_range(paragraph, document, rules)
+    except KeyError:
+        return True
+
+
+def _safe_looks_like_body_paragraph(paragraph: ParagraphInfo, rules: RuleSet | None = None) -> bool:
+    try:
+        return _looks_like_body_paragraph(paragraph, rules)
+    except KeyError:
+        text = paragraph.text.strip()
+        return bool(text) and not _is_toc_paragraph(paragraph) and not _REFERENCE_ENTRY_RE.match(text)
+
+
 def _check_body_typography(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
     issues: list[Issue] = []
-    expected_indent = _float_cfg(rules, "body", "first_line_indent_chars")
-    expected_space_before = _float_cfg(rules, "body", "space_before_pt")
-    expected_space_after = _float_cfg(rules, "body", "space_after_pt")
+    expected_indent = _optional_float_cfg(rules, "body", "first_line_indent_chars")
+    expected_space_before = _optional_float_cfg(rules, "body", "space_before_pt")
+    expected_space_after = _optional_float_cfg(rules, "body", "space_after_pt")
+    expected_size = _optional_float_cfg(rules, "body", "size_pt")
+    expected_east_asia = _optional_str_cfg(rules, "body", "east_asia")
+    expected_ascii = _optional_str_cfg(rules, "body", "ascii")
     for paragraph in document.paragraphs:
-        if not _in_body_range(paragraph, document):
+        if not _safe_in_body_range(paragraph, document, rules):
             continue
-        if not _looks_like_body_paragraph(paragraph, rules):
+        if not _safe_looks_like_body_paragraph(paragraph, rules):
             continue
         if _is_toc_paragraph(paragraph):
             continue
         text = paragraph.text.strip()
-        if paragraph.first_line_indent_chars is None:
+        if expected_indent is not None and paragraph.first_line_indent_chars is None:
             issues.append(
                 _issue(
                     "BODY_INDENT",
@@ -2326,7 +2398,7 @@ def _check_body_typography(document: DocumentInfo, rules: RuleSet | None = None)
                     evidence=text,
                 )
             )
-        elif abs(paragraph.first_line_indent_chars - expected_indent) > _float_cfg(rules, "tolerances", "indent_chars"):
+        elif expected_indent is not None and abs(paragraph.first_line_indent_chars - expected_indent) > _float_cfg(rules, "tolerances", "indent_chars"):
             issues.append(
                 _issue(
                     "BODY_INDENT",
@@ -2338,7 +2410,7 @@ def _check_body_typography(document: DocumentInfo, rules: RuleSet | None = None)
                     evidence=text,
                 )
             )
-        if not _space_pt_match(paragraph.space_before_pt, expected_space_before, rules):
+        if expected_space_before is not None and not _space_pt_match(paragraph.space_before_pt, expected_space_before, rules):
             issues.append(
                 _issue(
                     "BODY_SPACING",
@@ -2350,7 +2422,7 @@ def _check_body_typography(document: DocumentInfo, rules: RuleSet | None = None)
                     evidence=text,
                 )
             )
-        if not _space_pt_match(paragraph.space_after_pt, expected_space_after, rules):
+        if expected_space_after is not None and not _space_pt_match(paragraph.space_after_pt, expected_space_after, rules):
             issues.append(
                 _issue(
                     "BODY_SPACING",
@@ -2362,16 +2434,17 @@ def _check_body_typography(document: DocumentInfo, rules: RuleSet | None = None)
                     evidence=text,
                 )
             )
-        issues.extend(
-            _check_explicit_run_format(
-                paragraph,
-                code="BODY_FONT",
-                expected_size_pt=_float_cfg(rules, "body", "size_pt"),
-                expected_east_asia=str(_cfg(rules, "body", "east_asia")),
-                expected_ascii=str(_cfg(rules, "body", "ascii")),
-                rules=rules,
+        if expected_size is not None or expected_east_asia is not None or expected_ascii is not None:
+            issues.extend(
+                _check_explicit_run_format(
+                    paragraph,
+                    code="BODY_FONT",
+                    expected_size_pt=expected_size,
+                    expected_east_asia=expected_east_asia,
+                    expected_ascii=expected_ascii,
+                    rules=rules,
+                )
             )
-        )
         for run in _visible_runs(paragraph):
             if run.bold is True:
                 issues.append(
@@ -2589,99 +2662,343 @@ def _line_spacing_issues_for_paragraph(
     return issues
 
 
-def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
-    """Run all supported checks."""
+def _check_numbering_document(document: DocumentInfo, rules: RuleSet) -> list[Issue]:
     issues: list[Issue] = []
-    issues.extend(_check_structure_presence(document, rules))
-    issues.extend(_check_page_settings(document, rules))
-    issues.extend(_check_header_text(document, rules))
-    issues.extend(_check_static_headers_and_page_numbers(document, rules))
-    issues.extend(_check_major_heading_spacing(document, rules))
-    issues.extend(_check_abstract_format(document, rules))
-    issues.extend(_check_headings(document, rules))
-    issues.extend(_check_heading_script_fonts(document, rules))
     for paragraph in document.paragraphs:
         issues.extend(_check_numbering(paragraph, rules))
-    issues.extend(_check_keywords(document, rules))
-    issues.extend(_check_references(document, rules))
-    issues.extend(_check_reference_citations(document, rules))
-    issues.extend(_check_toc_fields(document, rules))
-    issues.extend(_check_table_borders(document, rules))
-    issues.extend(_check_captions(document, rules))
-    issues.extend(_check_caption_object_order(document, rules))
-    issues.extend(_check_continued_table_layout(document, rules))
-    issues.extend(_check_page_numbering_static(document, rules))
-    issues.extend(_check_reference_typography(document, rules))
-    issues.extend(_check_empty_paragraphs(document, rules))
-    issues.extend(_check_body_typography(document, rules))
-    issues.extend(_check_mixed_language_spacing(document, rules))
-    issues.extend(_check_table_cell_typography(document, rules))
-    issues.extend(_check_thanks_format(document, rules))
-    issues.extend(_check_line_spacing(document, rules))
+    return issues
+
+
+def _check_header_line_format(document: DocumentInfo, rules: RuleSet) -> list[Issue]:
+    return [issue for issue in _check_static_headers_and_page_numbers(document, rules) if issue.code == "HEADER_LINE_WIDTH"]
+
+
+def _check_reference_citation_separator(document: DocumentInfo, rules: RuleSet | None = None) -> list[Issue]:
+    issues: list[Issue] = []
+    expected_separator = str(_cfg(rules, "reference", "citation_separator"))
+    first_body = _first_body_paragraph_index(document, rules)
+    reference_start = _reference_heading_index(document, rules)
+    for paragraph in document.paragraphs:
+        if paragraph.index < first_body:
+            continue
+        if reference_start is not None and paragraph.index >= reference_start:
+            continue
+        raw_text = paragraph.text
+        for match in _REFERENCE_CITATION_RE.finditer(raw_text):
+            citation_inner = match.group(1)
+            if "," in citation_inner and expected_separator != ",":
+                citation_text = match.group(0)
+                issues.append(
+                    _issue(
+                        "REFERENCE_CITATION_SEPARATOR",
+                        Severity.WARNING,
+                        "Multiple reference numbers in one citation should use the configured separator.",
+                        location=_paragraph_location(paragraph),
+                        expected=f"configured separator, e.g. [1{expected_separator}2]",
+                        actual=citation_text,
+                        evidence=citation_text,
+                    )
+                )
+    return issues
+
+
+def _check_registry():
+    return (
+        (
+            "structure",
+            (
+                "STRUCTURE_ABSTRACT_CN",
+                "STRUCTURE_ABSTRACT_EN",
+                "STRUCTURE_TOC",
+                "STRUCTURE_BODY_START",
+                "STRUCTURE_REFERENCES",
+                "STRUCTURE_THANKS",
+            ),
+            _check_structure_presence,
+        ),
+        ("page", ("PAGE_SETUP",), _check_page_settings),
+        ("header_text", ("HEADER_TEXT",), _check_header_text),
+        (
+            "header_static",
+            ("STATIC_BODY_HEADER", "STATIC_PAGE_FIELD", "HEADER_LINE_POSITION"),
+            _check_static_headers_and_page_numbers,
+        ),
+        ("header_line", ("HEADER_LINE_WIDTH",), _check_header_line_format),
+        ("major_headings", ("MAJOR_HEADING_SPACING",), _check_major_heading_spacing),
+        ("abstract", ("ABSTRACT_FORMAT",), _check_abstract_format),
+        (
+            "headings",
+            ("HEADING_PUNCTUATION", "HEADING_FORMAT", "HEADING_SCRIPT_FONT", "HEADING_SPACING"),
+            lambda document, rules: _check_headings(document, rules) + _check_heading_script_fonts(document, rules),
+        ),
+        ("numbering", ("FIGURE_NUMBERING", "TABLE_NUMBERING", "EQUATION_NUMBERING"), _check_numbering_document),
+        (
+            "keywords",
+            ("KEYWORD_LABEL_FORMAT", "KEYWORD_SEPARATOR", "KEYWORD_TERMINATOR", "KEYWORD_COUNT"),
+            _check_keywords,
+        ),
+        (
+            "references",
+            (
+                "REFERENCE_FORMAT",
+                "REFERENCE_CITATION_FORMAT",
+                "REFERENCE_CITATION_FIELD",
+                "REFERENCE_CITATION_TARGET",
+                "REFERENCE_HEADING_FORMAT",
+                "REFERENCE_LIST_FORMAT",
+                "REFERENCE_LIST_SPACING",
+            ),
+            lambda document, rules: _check_references(document, rules)
+            + _check_reference_citations(document, rules)
+            + _check_reference_typography(document, rules),
+        ),
+        ("reference_citation_separator", ("REFERENCE_CITATION_SEPARATOR",), _check_reference_citation_separator),
+        ("toc", ("TOC_FIELD",), _check_toc_fields),
+        (
+            "table_layout",
+            (
+                "TABLE_BORDER",
+                "TABLE_THREE_LINE",
+                "TABLE_LINE_COUNT",
+                "TABLE_BORDER_WIDTH",
+                "TABLE_HEADER_BORDER",
+                "TABLE_WIDTH",
+                "TABLE_ALIGNMENT",
+                "TABLE_CELL_WIDTH",
+                "TABLE_CELL_ALIGNMENT",
+            ),
+            _check_table_borders,
+        ),
+        (
+            "table_cells",
+            (
+                "TABLE_CELL_FORMAT",
+                "TABLE_CELL_FONT",
+                "TABLE_CELL_SPACING",
+            ),
+            _check_table_cell_typography,
+        ),
+        (
+            "captions",
+            (
+                "CAPTION_SEPARATOR",
+                "CAPTION_FORMAT",
+                "CAPTION_LINE_SPACING",
+                "FIGURE_CAPTION_POSITION",
+                "TABLE_CAPTION_POSITION",
+                "CONTINUED_TABLE_LAYOUT",
+            ),
+            lambda document, rules: _check_captions(document, rules)
+            + _check_caption_object_order(document, rules)
+            + _check_continued_table_layout(document, rules),
+        ),
+        ("page_numbering", ("PAGE_NUMBERING_STATIC",), _check_page_numbering_static),
+        ("empty_paragraphs", ("EMPTY_PARAGRAPHS",), _check_empty_paragraphs),
+        ("body", ("BODY_INDENT", "BODY_SPACING", "BODY_FONT"), _check_body_typography),
+        ("mixed_language", ("MIXED_LANGUAGE_SPACING",), _check_mixed_language_spacing),
+        ("thanks", ("THANKS_HEADING_FORMAT", "THANKS_BODY_FORMAT"), _check_thanks_format),
+        ("line_spacing", ("LINE_SPACING",), _check_line_spacing),
+    )
+
+
+CHECK_SELECTOR_ALIASES = {
+    "header": {"header_text", "header_static", "header_line"},
+    "references": {"references", "reference_citation_separator"},
+    "tables": {"table_layout", "table_cells"},
+}
+
+
+def _configured_checks(rules: RuleSet) -> tuple[set[str] | None, set[str]]:
+    checks_config = rules.config.get("checks", {}) if isinstance(rules.config, dict) else {}
+    if not isinstance(checks_config, dict):
+        raise ValueError("checks must be an object")
+    enabled_raw = checks_config.get("enabled")
+    disabled_raw = checks_config.get("disabled")
+    enabled = None
+    if enabled_raw is not None:
+        if not isinstance(enabled_raw, list):
+            raise ValueError("checks.enabled must be an array")
+        enabled = {str(item) for item in enabled_raw}
+    disabled = set()
+    if disabled_raw is not None:
+        if not isinstance(disabled_raw, list):
+            raise ValueError("checks.disabled must be an array")
+        disabled = {str(item) for item in disabled_raw}
+    selectors = _known_check_selectors()
+    unknown = sorted(((enabled or set()) | disabled) - selectors)
+    if unknown:
+        raise ValueError(f"unknown checks selector: {', '.join(unknown)}")
+    return enabled, disabled
+
+
+def _known_check_selectors() -> set[str]:
+    selectors: set[str] = set()
+    for group, items, _runner in _check_registry():
+        selectors.add(group)
+        selectors.update(items)
+    selectors.update(CHECK_SELECTOR_ALIASES)
+    return selectors
+
+
+def _groups_for_selector(selector: str) -> set[str]:
+    groups: set[str] = set()
+    groups.update(CHECK_SELECTOR_ALIASES.get(selector, set()))
+    for group, items, _runner in _check_registry():
+        if selector == group or selector in items:
+            groups.add(group)
+    return groups
+
+
+def _item_is_selected(item: str, group: str, enabled: set[str] | None, disabled: set[str]) -> bool:
+    if _item_is_disabled(item, group, disabled):
+        return False
+    if enabled is None:
+        return True
+    return item in enabled or group in enabled or any(group in CHECK_SELECTOR_ALIASES.get(selector, set()) for selector in enabled)
+
+
+def _item_is_disabled(item: str, group: str, disabled: set[str]) -> bool:
+    return item in disabled or group in disabled or any(group in _groups_for_selector(selector) for selector in disabled)
+
+
+def _active_item_codes(rules: RuleSet) -> tuple[set[str], tuple[str, ...]]:
+    enabled, disabled = _configured_checks(rules)
+    active: set[str] = set()
+    skipped: list[str] = []
+    for group, items, _runner in _check_registry():
+        for item in items:
+            if _item_is_selected(item, group, enabled, disabled):
+                active.add(item)
+                continue
+            reason = (
+                "disabled by the active school rules"
+                if _item_is_disabled(item, group, disabled)
+                else "not enabled by the active school rules"
+            )
+            skipped.append(f"{item}: {reason}")
+    return active, tuple(skipped)
+
+
+def _group_required_paths(group: str) -> tuple[tuple[str, ...], ...]:
+    return {
+        "structure": (("structure", "required"),),
+        "header_text": (("header", "body_text"),),
+        "header_static": (("header", "body_text"),),
+        "header_line": (("header", "body_text"), ("header", "line_size_eighths"), ("header", "line_space")),
+        "major_headings": (("structure", "major_heading_expected"),),
+        "abstract": (("abstract",), ("structure", "headings")),
+        "headings": (("heading",), ("structure", "patterns")),
+        "numbering": (("numbering",),),
+        "keywords": (("keywords",),),
+        "references": (("reference",), ("structure", "headings")),
+        "toc": (("structure", "headings"),),
+        "table_layout": (("table",),),
+        "table_cells": (("table",),),
+        "captions": (("caption",), ("numbering",)),
+        "body": (("body",),),
+        "mixed_language": (("structure",),),
+        "thanks": (("thanks",), ("structure", "headings")),
+        "line_spacing": (("body",),),
+    }.get(group, ())
+
+
+def _item_required_paths(item: str) -> tuple[tuple[str, ...], ...]:
+    return {
+        "BODY_INDENT": (("body", "first_line_indent_chars"),),
+        "BODY_SPACING": (("body", "space_before_pt"), ("body", "space_after_pt")),
+        "BODY_FONT": (("body", "size_pt"), ("body", "east_asia"), ("body", "ascii")),
+        "KEYWORD_LABEL_FORMAT": (
+            ("keywords", "cn_label"),
+            ("keywords", "en_label"),
+            ("keywords", "label_delimiter"),
+            ("keywords", "allow_space_before_delimiter"),
+            ("keywords", "allow_space_after_delimiter"),
+        ),
+        "KEYWORD_SEPARATOR": (("keywords", "separator"),),
+        "KEYWORD_TERMINATOR": (("keywords", "separator"), ("keywords", "forbid_trailing_separator")),
+        "KEYWORD_COUNT": (("keywords", "separator"), ("keywords", "min_count"), ("keywords", "max_count")),
+        "REFERENCE_CITATION_SEPARATOR": (
+            ("reference", "citation_separator"),
+            ("structure", "patterns", "body_start"),
+            ("structure", "headings", "reference"),
+        ),
+        "HEADER_TEXT": (("header", "body_text"),),
+        "STATIC_BODY_HEADER": (("header", "body_text"),),
+        "HEADER_LINE_POSITION": (("header", "body_text"),),
+        "HEADER_LINE_WIDTH": (("header", "line_size_eighths"), ("header", "line_space")),
+        "TABLE_CELL_ALIGNMENT": (("table", "cell_alignment"),),
+        "TABLE_CELL_FORMAT": (("table", "cell_size_pt"),),
+        "TABLE_CELL_FONT": (("table", "cell_east_asia"), ("table", "cell_ascii")),
+        "TABLE_CELL_SPACING": (
+            ("table", "cell_space_before_pt"),
+            ("table", "cell_space_after_pt"),
+            ("table", "cell_line_spacing_pt"),
+        ),
+    }.get(item, ())
+
+
+def _missing_config_paths(rules: RuleSet, group: str) -> tuple[str, ...]:
+    missing: list[str] = []
+    for path in _group_required_paths(group):
+        current = rules.config
+        found = True
+        for item in path:
+            if not isinstance(current, dict) or item not in current:
+                found = False
+                break
+            current = current[item]
+        if not found:
+            missing.append(".".join(path))
+    return tuple(missing)
+
+
+def _missing_item_config_paths(rules: RuleSet, item: str) -> tuple[str, ...]:
+    missing: list[str] = []
+    for path in _item_required_paths(item):
+        current = rules.config
+        found = True
+        for part in path:
+            if not isinstance(current, dict) or part not in current:
+                found = False
+                break
+            current = current[part]
+        if not found:
+            missing.append(".".join(path))
+    return tuple(missing)
+
+
+def run_checks(document: DocumentInfo, rules: RuleSet) -> CheckResult:
+    """Run checks selected by the active school rules."""
+    issues: list[Issue] = []
+    active_items, skipped_items = _active_item_codes(rules)
+    known_items = {item for _group, items, _runner in _check_registry() for item in items}
+    checked_items: list[str] = []
+    skipped = list(skipped_items)
+    for group, items, runner in _check_registry():
+        selected_items = tuple(item for item in items if item in active_items)
+        if not selected_items:
+            continue
+        missing_paths = _missing_config_paths(rules, group)
+        if missing_paths:
+            for item in selected_items:
+                skipped.append(f"{item}: missing config path {', '.join(missing_paths)}")
+            continue
+        runnable_items = []
+        for item in selected_items:
+            missing_item_paths = _missing_item_config_paths(rules, item)
+            if missing_item_paths:
+                skipped.append(f"{item}: missing config path {', '.join(missing_item_paths)}")
+            else:
+                runnable_items.append(item)
+        if not runnable_items:
+            continue
+        group_issues = runner(document, rules)
+        runnable_set = set(runnable_items)
+        issues.extend(issue for issue in group_issues if issue.code in runnable_set or issue.code not in known_items)
+        checked_items.extend(runnable_items)
     return CheckResult(
         issues=tuple(issues),
-        checked_items=(
-            "STRUCTURE_ABSTRACT_CN",
-            "STRUCTURE_ABSTRACT_EN",
-            "STRUCTURE_TOC",
-            "STRUCTURE_BODY_START",
-            "STRUCTURE_REFERENCES",
-            "STRUCTURE_THANKS",
-            "PAGE_SETUP",
-            "HEADER_TEXT",
-            "STATIC_BODY_HEADER",
-            "STATIC_PAGE_FIELD",
-            "HEADER_LINE_POSITION",
-            "HEADER_LINE_WIDTH",
-            "MAJOR_HEADING_SPACING",
-            "ABSTRACT_FORMAT",
-            "HEADING_PUNCTUATION",
-            "HEADING_FORMAT",
-            "HEADING_SCRIPT_FONT",
-            "HEADING_SPACING",
-            "FIGURE_NUMBERING",
-            "TABLE_NUMBERING",
-            "EQUATION_NUMBERING",
-            "KEYWORD_LABEL_FORMAT",
-            "KEYWORD_SEPARATOR",
-            "KEYWORD_TERMINATOR",
-            "KEYWORD_COUNT",
-            "REFERENCE_FORMAT",
-            "REFERENCE_CITATION_FORMAT",
-            "REFERENCE_CITATION_FIELD",
-            "REFERENCE_CITATION_SEPARATOR",
-            "REFERENCE_CITATION_TARGET",
-            "TOC_FIELD",
-            "TABLE_BORDER",
-            "TABLE_THREE_LINE",
-            "TABLE_LINE_COUNT",
-            "TABLE_BORDER_WIDTH",
-            "TABLE_HEADER_BORDER",
-            "TABLE_WIDTH",
-            "TABLE_ALIGNMENT",
-            "TABLE_CELL_WIDTH",
-            "TABLE_CELL_ALIGNMENT",
-            "CAPTION_SEPARATOR",
-            "CAPTION_FORMAT",
-            "CAPTION_LINE_SPACING",
-            "FIGURE_CAPTION_POSITION",
-            "TABLE_CAPTION_POSITION",
-            "CONTINUED_TABLE_LAYOUT",
-            "PAGE_NUMBERING_STATIC",
-            "REFERENCE_HEADING_FORMAT",
-            "REFERENCE_LIST_FORMAT",
-            "REFERENCE_LIST_SPACING",
-            "EMPTY_PARAGRAPHS",
-            "BODY_INDENT",
-            "BODY_SPACING",
-            "BODY_FONT",
-            "MIXED_LANGUAGE_SPACING",
-            "TABLE_CELL_FORMAT",
-            "TABLE_CELL_FONT",
-            "TABLE_CELL_SPACING",
-            "THANKS_HEADING_FORMAT",
-            "THANKS_BODY_FORMAT",
-            "LINE_SPACING",
-        ),
+        checked_items=tuple(checked_items),
+        skipped_items=tuple(skipped),
         unsupported_items=rules.manual_review_items,
     )
