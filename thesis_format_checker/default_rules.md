@@ -27,12 +27,12 @@
   "page": {
     "page_width_cm": 21.0,
     "page_height_cm": 29.7,
-    "margin_top_cm": 2.54,
-    "margin_bottom_cm": 2.54,
-    "margin_left_cm": 3.17,
-    "margin_right_cm": 3.17,
-    "header_distance_cm": 1.27,
-    "footer_distance_cm": 1.27
+    "margin_top_cm": 2.5,
+    "margin_bottom_cm": 2.0,
+    "margin_left_cm": 2.5,
+    "margin_right_cm": 2.0,
+    "header_distance_cm": 2.6,
+    "footer_distance_cm": 2.4
   },
   "header": {
     "body_text": "武汉理工大学本科毕业设计（论文）",
